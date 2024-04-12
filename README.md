@@ -1,5 +1,3 @@
-Certainly! Here's a sample GitHub description for your Django management command:
-
 ---
 
 ## Django Database Purge
@@ -40,5 +38,3 @@ Contributions are welcome! If you encounter any issues or have suggestions for i
 This project is licensed under the [MIT License](link_to_license_file).
 
 ---
-
-Feel free to customize this description further to better suit your project and its requirements!
