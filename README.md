@@ -11,13 +11,16 @@ The Django Database Purge management command is a tool for efficiently removing 
 - **Customizable**: Adapt the command to suit your project's specific requirements and database structure.
 - **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
 
-### Installation:
-
-To install Django Database Purge, simply add it to your Django project's `INSTALLED_APPS` and run the management command.
+### How to Use:
 
 ```bash
 pip install django-db-purge
 ```
+
+Include dbpurge in your INSTALLED_APPS. Then, create your database purgers or file purgers in the admin interface.
+
+Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron.
+
 
 ### Usage:
 
@@ -27,7 +30,9 @@ After installation, use the management command to purge records from your databa
 python manage.py db_purge
 ```
 
-For more advanced usage and customization options, refer to the [documentation](link_to_documentation).
+Include purge in your INSTALLED_APPS. Then, create your database purgers or file purgers in the admin interface.
+
+Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron (add purge.cron to your CRON_CLASSES in your settings.py). The builtin CronJob class is set to run every 4 hours. You can change this by altering your settings.py and adding PURGE_CRON_RUN_AT_TIMES to an array of times you want to run the job at (e.g., ['1:00'] to run at 1am).
 
 ### Contributions:
 
