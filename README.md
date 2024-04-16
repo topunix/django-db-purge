@@ -17,7 +17,41 @@ The Django Database Purge management command is a tool for efficiently removing 
 pip install django-db-purge
 ```
 
-Include dbpurge in your INSTALLED_APPS. Then, create your database purgers or file purgers in the admin interface.
+Include dbpurge in your INSTALLED_APPS. Then, users need to provide their own values based on their application's requirements. Below is a guide on how to set up the retention policies:
+
+### 1. `app_name`
+
+- **Description**: Name of the Django app containing the model.
+- **Example**: `my_django_app`
+
+### 2. `model_name`
+
+- **Description**: Name of the Django model from which records will be deleted.
+- **Example**: `MyModel`
+
+### 3. `time_based_column_name`
+
+- **Description**: Name of the column in the model that contains the timestamp or datetime field used for determining the age of records.
+- **Example**: `created_at`
+
+### 4. `data_retention_num_seconds`
+
+- **Description**: Time duration in seconds for which records will be retained before deletion.
+- **Example**: `2592000` (for 30 days)
+
+### Example:
+
+```python
+retention_policies = [
+    {
+        'app_name': 'my_django_app',
+        'model_name': 'MyModel',
+        'time_based_column_name': 'created_at',
+        'data_retention_num_seconds': 2592000,  # 30 days in seconds
+    },
+    # Add more retention policies as needed
+]
+
 
 Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron.
 
@@ -30,7 +64,12 @@ After installation, use the management command to purge records from your databa
 python manage.py db_purge
 ```
 
-Include purge in your INSTALLED_APPS. Then, create your database purgers or file purgers in the admin interface.
+Include purge in your INSTALLED_APPS. Then, create your 
+
+
+
+
+
 
 Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron (add purge.cron to your CRON_CLASSES in your settings.py). The builtin CronJob class is set to run every 4 hours. You can change this by altering your settings.py and adding PURGE_CRON_RUN_AT_TIMES to an array of times you want to run the job at (e.g., ['1:00'] to run at 1am).
 
