@@ -51,7 +51,7 @@ retention_policies = [
     },
     # Add more retention policies as needed
 ]
-
+```
 
 Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron.
 
