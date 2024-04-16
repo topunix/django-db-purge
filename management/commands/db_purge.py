@@ -8,6 +8,8 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+# This is a placeholder value for the retention period in seconds.
+# Users must replace this value with their desired retention period.
 TIME_IN_SECS = 30 * 24 * 60 * 60  # 30 days in seconds
 
 class Command(BaseCommand):
