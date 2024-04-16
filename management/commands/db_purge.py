@@ -8,7 +8,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-EIGHT_WEEKS_IN_SECS = 86400 * 7 * 8
+TIME_IN_SECS = 86400 * 7 * 8
 
 class Command(BaseCommand):
     help = 'Delete expired database records based on the retention policy'
@@ -20,7 +20,7 @@ class Command(BaseCommand):
                 'app_name': 'django_app_name_here',
                 'model_name': 'YourDjangoModelNameHere',
                 'time_based_column_name': 'timestamp',
-                'data_retention_num_seconds': EIGHT_WEEKS_IN_SECS,
+                'data_retention_num_seconds': TIME_IN_SECS,
             },
             # Add more retention policies as needed
         ]
