@@ -18,7 +18,7 @@ pip install django-db-purge
 ```
 2. Include 'dbpurge' in your INSTALLED_APPS settings. 
 3. Locate the `db_purge.py` file in the `management/commands` directory of the Django dbpurge app.
-4. Add your own values to the retention policies dictionary in the `db_purge.py` file, based on your application's requirements. Below is a guide on how to set up the retention policies:
+4. Add your own values to the retention policies dictionary in the `db_purge.py` file, based on your requirements. Below is a guide on how to set up the retention policies:
 
 ### 1. `app_name`
 
