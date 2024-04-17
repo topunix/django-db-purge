@@ -20,30 +20,30 @@ pip install django-db-purge
 3. Locate the `db_purge.py` file in the `management/commands` directory of the Django dbpurge app.
 4. Add your own values to the retention policies dictionary in the `db_purge.py` file, based on your requirements. Below is a guide on how to set up the retention policies:
 
-    ### 1. `app_name`
+    #### 1. `app_name`
 
     - **Description**: Name of the Django app containing the model.
     - **Example**: `my_django_app`
 
-    ### 2. `model_name`
+    #### 2. `model_name`
 
     - **Description**: Name of the Django model from which records will be deleted.
     - **Example**: `MyModel`
 
-    ### 3. `time_based_column_name`
+    #### 3. `time_based_column_name`
 
     - **Description**: Name of the column in the model that contains the timestamp or datetime field used for determining the age of records.
     - **Example**: `created_at`
 
-    ### 4. `data_retention_num_seconds`
+    #### 4. `data_retention_num_seconds`
 
     - **Description**: Time duration in seconds for which records will be retained before deletion.
     - **Example**: `2592000` (for 30 days)
 
-### Example:
+    #### Example:
 
-```python
-retention_policies = [
+    ```python
+    retention_policies = [
     {
         'app_name': 'my_django_app',
         'model_name': 'MyModel',
@@ -51,8 +51,8 @@ retention_policies = [
         'data_retention_num_seconds': 2592000,  # 30 days in seconds
     },
     # Add more retention policies as needed
-]
-```
+    ]
+    ```
 5. Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
 
 ### Contributions:
