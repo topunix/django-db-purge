@@ -57,10 +57,10 @@ Then, either periodically call the dbpurge management command (e.g., via a syste
 
 ### Contributions:
 
-Contributions are welcome! If you encounter any issues or have suggestions for improvements, please submit an issue or pull request on [GitHub](link_to_github_repo).
+Contributions are welcome! If you encounter any issues or have suggestions for improvements, please submit an issue or pull request on GitHub.
 
 ### License:
 
-This project is licensed under the [MIT License](link_to_license_file).
+This project is licensed under the MIT License.
 
 ---
