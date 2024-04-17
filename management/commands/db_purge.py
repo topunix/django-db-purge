@@ -17,6 +17,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         total_deleted_records = 0
+        # Define retention policies. Users must add their own values to this dictionary.
         retention_policies = [
             {
                 'app_name': 'django_app_name_here',
