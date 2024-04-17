@@ -53,7 +53,7 @@ retention_policies = [
     # Add more retention policies as needed
 ]
 ```
-Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
+5. Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
 
 ### Contributions:
 
