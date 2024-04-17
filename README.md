@@ -12,12 +12,13 @@ The Django Database Purge management command is a tool for efficiently removing 
 - **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
 
 ### How to Use:
-
+1. Install django-db-purge by running:
 ```bash
 pip install django-db-purge
 ```
-
-Include dbpurge in your INSTALLED_APPS. Then, users need to provide their own values based on their application's requirements. Below is a guide on how to set up the retention policies:
+2. Include 'dbpurge' in your INSTALLED_APPS settings. 
+3. Locate the `db_purge.py` file in the `management/commands` directory of the Django dbpurge app.
+4. Add your own values to the retention policies dictionary in the `db_purge.py` file, based on your application's requirements. Below is a guide on how to set up the retention policies:
 
 ### 1. `app_name`
 
