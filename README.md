@@ -53,26 +53,7 @@ retention_policies = [
     # Add more retention policies as needed
 ]
 ```
-
-Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron.
-
-
-### Usage:
-
-After installation, use the management command to purge records from your database according to your specified retention policy.
-
-```bash
-python manage.py db_purge
-```
-
-Include purge in your INSTALLED_APPS. Then, create your 
-
-
-
-
-
-
-Then, either periodically call the purge management command (e.g., via a system cronjob), or install and configure django-cron (add purge.cron to your CRON_CLASSES in your settings.py). The builtin CronJob class is set to run every 4 hours. You can change this by altering your settings.py and adding PURGE_CRON_RUN_AT_TIMES to an array of times you want to run the job at (e.g., ['1:00'] to run at 1am).
+Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
 
 ### Contributions:
 
