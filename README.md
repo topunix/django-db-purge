@@ -44,13 +44,13 @@ pip install django-db-purge
 
     ```python
     retention_policies = [
-    {
-        'app_name': 'my_django_app',
-        'model_name': 'MyModel',
-        'time_based_column_name': 'created_at',
-        'data_retention_num_seconds': 2592000,  # 30 days in seconds
-    },
-    # Add more retention policies as needed
+        {
+            'app_name': 'my_django_app',
+            'model_name': 'MyModel',
+            'time_based_column_name': 'created_at',
+            'data_retention_num_seconds': 2592000,  # 30 days in seconds
+        },
+        # Add more retention policies as needed
     ]
     ```
 5. Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
