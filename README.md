@@ -53,7 +53,7 @@ pip install django-db-purge
         # Add more retention policies as needed
     ]
     ```
-5. Then, either periodically call the dbpurge management command (e.g., via a system cronjob), or install and configure django-cron.
+5. Then, either periodically call the db_purge management command (e.g., via a system cronjob), or install and configure django-cron.
 
 ### Contributions:
 
