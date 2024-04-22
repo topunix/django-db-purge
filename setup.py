@@ -13,6 +13,7 @@ setup(
     version='0.2',
     packages=find_packages(),
     description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
+    long_description_content_type="text/markdown",
     long_description = long_description,
     install_requires=['Django>=2'],
     url='https://github.com/topunix/django-db-purge',
