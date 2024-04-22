@@ -1,17 +1,19 @@
 import os
 from setuptools import find_packages, setup
 
-
-
 # allow setup.py to be run from any path
 os.chdir(os.path.normpath(os.path.join(os.path.abspath(__file__), os.pardir)))
 
+# get README
+with open('README.rst') as f:
+    long_description = f.read()
 
 setup(
     name='django-db-purge',
-    version='0.1',
+    version='0.2',
     packages=find_packages(),
     description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
+    long_description = long_description,
     install_requires=['Django>=2'],
     url='https://github.com/topunix/django-db-purge',
     author='topunix',
