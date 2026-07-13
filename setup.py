@@ -10,7 +10,7 @@ with open('README.rst') as f:
 
 setup(
     name='django-db-purge',
-    version='0.2',
+    version='1.2.0',
     packages=find_packages(),
     description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
     long_description_content_type="text/markdown",
