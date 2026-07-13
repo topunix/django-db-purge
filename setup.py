@@ -1,11 +1,13 @@
 import os
 from setuptools import find_packages, setup
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # allow setup.py to be run from any path
-os.chdir(os.path.normpath(os.path.join(os.path.abspath(__file__), os.pardir)))
+os.chdir(BASE_DIR)
 
 # get README
-with open('README.md') as f:
+with open(os.path.join(BASE_DIR, 'README.md')) as f:
     long_description = f.read()
 
 setup(
