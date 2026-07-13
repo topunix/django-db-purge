@@ -1,7 +1,15 @@
+from dataclasses import replace
+from datetime import timedelta
+
 from django.test import TestCase
 from django.utils import timezone
 
-from dbpurge.management.commands.purge_mcp_server import get_purge_candidates
+from dbpurge.management.commands.purge_mcp_server import (
+    _TOKENS,
+    get_purge_candidates,
+    preview_purge_candidates,
+    token_is_valid,
+)
 from tests.models import SampleRecord
 
 
@@ -18,3 +26,57 @@ class TestListPurgeCandidates(TestCase):
         get_purge_candidates()
 
         self.assertEqual(SampleRecord.objects.count(), 1)
+
+
+class TestPreviewPurgeCandidates(TestCase):
+    def setUp(self):
+        self.old_record = SampleRecord.objects.create(
+            created_at=timezone.now() - timedelta(days=10), label="old"
+        )
+        self.params = ("tests", "samplerecord", "created_at", 3600)
+
+    def test_issues_a_valid_token_bound_to_the_params(self):
+        preview = preview_purge_candidates(*self.params)
+
+        self.assertEqual(preview["row_count"], 1)
+        self.assertEqual(preview["sample_rows"], [
+            {"pk": self.old_record.pk, "created_at": self.old_record.created_at.isoformat()}
+        ])
+        self.assertTrue(token_is_valid(preview["confirmation_token"], *self.params))
+
+    def test_caps_sample_rows_at_five(self):
+        SampleRecord.objects.all().delete()
+        for i in range(7):
+            SampleRecord.objects.create(
+                created_at=timezone.now() - timedelta(days=10, minutes=i), label=str(i)
+            )
+
+        preview = preview_purge_candidates(*self.params)
+
+        self.assertEqual(preview["row_count"], 7)
+        self.assertEqual(len(preview["sample_rows"]), 5)
+
+    def test_performs_no_deletes(self):
+        preview_purge_candidates(*self.params)
+
+        self.assertEqual(SampleRecord.objects.count(), 1)
+
+    def test_token_rejected_once_expired(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+        _TOKENS[token] = replace(
+            _TOKENS[token], expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        self.assertFalse(token_is_valid(token, *self.params))
+
+    def test_token_rejected_on_parameter_drift(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        drifted_params = ("tests", "samplerecord", "created_at", 7200)
+
+        self.assertFalse(token_is_valid(token, *drifted_params))
+
+    def test_unknown_token_rejected(self):
+        self.assertFalse(token_is_valid("not-a-real-token", *self.params))
