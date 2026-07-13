@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_FASTMCP_ERROR = (
     "fastmcp is required to run the MCP server. Install it with "
-    "pip install django-db-purge[mcp]."
+    'pip install "django-db-purge[mcp]".'
 )
 
 

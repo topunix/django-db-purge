@@ -70,7 +70,7 @@ django-db-purge also ships an MCP server that exposes the same purge logic to an
 The MCP server needs `fastmcp`, which is an optional extra, not part of the base install:
 
 ```bash
-pip install django-db-purge[mcp]
+pip install "django-db-purge[mcp]"
 ```
 
 If `fastmcp` is not installed, running `purge_mcp_server` fails immediately with a `CommandError` pointing back at this install command, rather than a raw import traceback.
@@ -145,7 +145,7 @@ A healthy `tools/list` response shows all three tools: `list_purge_candidates`, 
 
 ### Running the tests
 
-From a bare checkout, with this package installed with the `mcp` extra (`pip install -e .[mcp]`), no separate install step for Django or `fastmcp` is required:
+From a bare checkout, with this package installed with the `mcp` extra (`pip install -e ".[mcp]"`), no separate install step for Django or `fastmcp` is required:
 
 ```bash
 python runtests.py
