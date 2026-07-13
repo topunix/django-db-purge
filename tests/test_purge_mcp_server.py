@@ -111,7 +111,16 @@ class TestExecutePurgeCandidates(TestCase):
         self.assertEqual(SampleRecord.objects.count(), 0)
 
     def test_token_is_single_use(self):
+        # This is the retry/double-spend scenario, simulated without
+        # real threads: the fix's guarantee is that the token is
+        # popped out of _TOKENS atomically with the first call, so a
+        # second (or a racing concurrent) call has nothing left to
+        # validate against. We can't fork real concurrent requests in
+        # a unit test, so the closest feasible proof is asserting the
+        # token is truly gone from the store immediately, not just
+        # logically rejected, before confirming the second call fails.
         execute_purge_candidates(*self.params, self.token)
+        self.assertNotIn(self.token, _TOKENS)
 
         message = self._error_message_for(self.token, self.params)
 
@@ -131,6 +140,16 @@ class TestExecutePurgeCandidates(TestCase):
 
         self.assertEqual(SampleRecord.objects.count(), 1)
         self.assertTrue(token_is_valid(self.token, *self.params))
+
+    def test_retry_succeeds_after_a_cap_breach_is_resolved(self):
+        with override_settings(DB_PURGE_MCP_MAX_ROWS=0):
+            with self.assertRaises(PurgePolicyError):
+                execute_purge_candidates(*self.params, self.token)
+
+        result = execute_purge_candidates(*self.params, self.token)
+
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(SampleRecord.objects.count(), 0)
 
     def test_opaque_message_identical_for_unknown_expired_and_drifted_tokens(self):
         unknown_message = self._error_message_for("not-a-real-token", self.params)

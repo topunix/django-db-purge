@@ -179,9 +179,39 @@ def token_is_valid(
     return True
 
 
-def consume_token(token: str) -> None:
-    """Invalidate token so it cannot be used again. Tokens are single-use."""
-    _TOKENS.pop(token, None)
+def _pop_valid_token(
+    token: str,
+    app_name: str,
+    model_name: str,
+    time_column: str,
+    retention_seconds: int,
+) -> _TokenRecord | None:
+    """
+    Atomically consume token, returning its record only if still valid.
+
+    Pops the token out of the store before checking expiry or params,
+    so at most one caller can ever receive a non-None record for a
+    given token: this closes the race where two concurrent
+    execute_purge calls both observe the token as valid before either
+    consumes it. A caller that then fails for a reason that is not its
+    fault (for example a row-cap breach) must put the record back with
+    _reinstate_token so the token remains usable for a retry.
+    """
+    record = _TOKENS.pop(token, None)
+    if record is None:
+        return None
+    if timezone.now() >= record.expires_at:
+        return None
+    if record.params_hash != _hash_params(
+        app_name, model_name, time_column, retention_seconds
+    ):
+        return None
+    return record
+
+
+def _reinstate_token(token: str, record: _TokenRecord) -> None:
+    """Put a popped-but-not-consumed token back, e.g. after a cap breach."""
+    _TOKENS[token] = record
 
 
 class PurgePreview(TypedDict):
@@ -272,12 +302,19 @@ def execute_purge_candidates(
     """
     Delete rows matched by a prior, still-valid preview_purge call.
 
-    Requires confirmation_token to be valid for these exact parameters
-    (see token_is_valid). Any mismatch, expiry, or unknown token raises
-    PurgePolicyError(TOKEN_ERROR_MESSAGE), the same message regardless
-    of which of those it was, and leaves the token unconsumed. On
-    success the token is consumed (single-use): a second execute call
-    with the same token fails the same way a bad token would.
+    Requires confirmation_token to be valid for these exact parameters.
+    The token is popped out of the store before it is checked, so at
+    most one caller can ever consume a given token even if two
+    execute_purge calls race (a client retry firing the same call
+    twice, or two concurrent requests). Any mismatch, expiry, or
+    unknown token raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the
+    same message regardless of which of those it was. On success the
+    token stays consumed (single-use). If the call then fails for a
+    reason that is not the caller's fault (a row-cap breach, or an
+    unexpected error during delete), the token is put back so a retry
+    with the same token can still succeed: only whoever actually holds
+    a legitimate, still-valid token gets to retry, since the pop
+    already rejected anyone else racing for the same token.
 
     DB_PURGE_MCP_MAX_ROWS bounds the number of *matching* rows (the
     same count preview_purge reports and what is re-checked here right
@@ -288,31 +325,34 @@ def execute_purge_candidates(
     """
     model = validate_policy(app_name, model_name, time_column, retention_seconds)
 
-    if not token_is_valid(
+    record = _pop_valid_token(
         confirmation_token, app_name, model_name, time_column, retention_seconds
-    ):
+    )
+    if record is None:
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
 
     max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
     cutoff = timezone.now() - timedelta(seconds=retention_seconds)
 
     start_time = time.time()
-    with transaction.atomic():
-        expired_records = model.objects.filter(**{f"{time_column}__lte": cutoff})
-        # count() and delete() are two separate queries. A concurrent
-        # writer can still insert or update a row matching this filter
-        # between them, even inside this transaction, so the row cap
-        # below is a coarse safety net rather than an exact guarantee.
-        row_count = expired_records.count()
-        if row_count > max_rows:
-            raise PurgePolicyError(
-                f"Purge would match {row_count} rows, exceeding the configured "
-                f"max of {max_rows} (DB_PURGE_MCP_MAX_ROWS). Refusing to execute."
-            )
-        deleted_total, deleted_by_model = expired_records.delete()
+    try:
+        with transaction.atomic():
+            expired_records = model.objects.filter(**{f"{time_column}__lte": cutoff})
+            # count() and delete() are two separate queries. A concurrent
+            # writer can still insert or update a row matching this filter
+            # between them, even inside this transaction, so the row cap
+            # below is a coarse safety net rather than an exact guarantee.
+            row_count = expired_records.count()
+            if row_count > max_rows:
+                raise PurgePolicyError(
+                    f"Purge would match {row_count} rows, exceeding the configured "
+                    f"max of {max_rows} (DB_PURGE_MCP_MAX_ROWS). Refusing to execute."
+                )
+            deleted_total, deleted_by_model = expired_records.delete()
+    except Exception:
+        _reinstate_token(confirmation_token, record)
+        raise
     took = time.time() - start_time
-
-    consume_token(confirmation_token)
 
     logger.info(
         "Executed purge of %s %s: deleted %s rows older than %s (took %.3fs)",
@@ -346,7 +386,10 @@ def execute_purge(
     whose parameters no longer match all fail with the identical
     "invalid or expired confirmation token" message, by design:
     callers cannot distinguish why a token was rejected. Tokens are
-    single-use, consumed only on a successful delete.
+    single-use: consumed as soon as this call starts, and restored if
+    the call then fails for a reason that is not the caller's fault
+    (for example a row-cap breach), so a retry with the same token can
+    still succeed.
 
     DB_PURGE_MCP_MAX_ROWS is re-checked against the live matching row
     count at execute time, even if preview_purge saw a count under the
