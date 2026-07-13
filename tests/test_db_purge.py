@@ -1,9 +1,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from datetime import timedelta
-from django.core.management import CommandError
+from django.core.management import CommandError, call_command
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from dbpurge.management.commands.db_purge import Command
+from tests.models import SampleRecord
 
 
 
@@ -71,6 +73,29 @@ class TestDBRetentionPolicy(unittest.TestCase):
         cmd = Command()
         with self.assertRaises(CommandError):
             cmd.validate_policy(policy)
+
+class TestRetentionPoliciesFromSettings(TestCase):
+    @override_settings(DB_PURGE_RETENTION_POLICIES=[
+        {
+            'app_name': 'tests',
+            'model_name': 'SampleRecord',
+            'time_based_column_name': 'created_at',
+            'data_retention_num_seconds': 3600,
+        },
+    ])
+    def test_deletes_only_records_past_the_configured_retention(self):
+        stale = SampleRecord.objects.create(
+            created_at=timezone.now() - timedelta(days=10), label='stale'
+        )
+        fresh = SampleRecord.objects.create(
+            created_at=timezone.now(), label='fresh'
+        )
+
+        call_command('db_purge')
+
+        self.assertFalse(SampleRecord.objects.filter(pk=stale.pk).exists())
+        self.assertTrue(SampleRecord.objects.filter(pk=fresh.pk).exists())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -26,8 +26,10 @@ operations without a human-verifiable preview step.
   HTTP is a later phase, not part of the initial build.
 - No LLM API calls anywhere in this codebase. The host runs the model.
   This server only exposes deterministic, schema-validated tools.
-- The existing db_purge cron command stays untouched. It is the
-  deterministic fallback path and must keep working exactly as is.
+- The MCP build is merged. The db_purge cron command remains the
+  deterministic fallback path and must keep working, but it is in
+  scope for changes now (e.g. sourcing retention policies from
+  Django settings), not frozen.
 
 ## Tool surface (exactly three tools)
 
@@ -88,3 +90,4 @@ operations without a human-verifiable preview step.
   and wait for confirmation.
 - When showing proposed edits in discussion, show only new or changed
   functions with comments marking unchanged code.
+- No co-author or attribution trailers in commit messages.

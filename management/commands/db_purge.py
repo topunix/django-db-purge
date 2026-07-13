@@ -1,5 +1,6 @@
 import logging
 import time
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.core.management import CommandError
 from django.apps import apps
@@ -12,23 +13,25 @@ logger = logging.getLogger(__name__)
 # Users must replace this value with their desired retention period.
 TIME_IN_SECS = 30 * 24 * 60 * 60  # 30 days in seconds
 
+# Used only when DB_PURGE_RETENTION_POLICIES is not set in Django settings.
+DEFAULT_RETENTION_POLICIES = [
+    {
+        'app_name': 'django_app_name_here',
+        'model_name': 'YourDjangoModelNameHere',
+        'time_based_column_name': 'timestamp',
+        'data_retention_num_seconds': TIME_IN_SECS,
+    },
+    # Add more retention policies as needed
+]
+
 class Command(BaseCommand):
     help = 'Delete expired database records based on the retention policy'
 
     def handle(self, *args, **options):
         total_deleted_records = 0
-        # ========================================================
-        # ATTENTION: USERS MUST ADD THEIR OWN VALUES TO THIS DICTIONARY
-        # ========================================================
-        retention_policies = [
-            {
-                'app_name': 'django_app_name_here',
-                'model_name': 'YourDjangoModelNameHere',
-                'time_based_column_name': 'timestamp',
-                'data_retention_num_seconds': TIME_IN_SECS,
-            },
-            # Add more retention policies as needed
-        ]
+        retention_policies = getattr(
+            settings, 'DB_PURGE_RETENTION_POLICIES', DEFAULT_RETENTION_POLICIES
+        )
 
         for policy in retention_policies:
             self.validate_policy(policy)

@@ -17,8 +17,7 @@ The Django Database Purge management command is a tool for efficiently removing 
 pip install django-db-purge
 ```
 2. Include 'dbpurge' in your INSTALLED_APPS settings. 
-3. Locate the `db_purge.py` file in the `management/commands` directory of the Django dbpurge app.
-4. Add your own values to the retention policies dictionary in the `db_purge.py` file, based on your requirements. Below is a guide on how to set up the retention policies:
+3. Add a `DB_PURGE_RETENTION_POLICIES` list to your project's `settings.py`, based on your requirements. Below is a guide on how to set up the retention policies:
 
     #### 1. `app_name`
 
@@ -43,7 +42,8 @@ pip install django-db-purge
     #### Example:
 
     ```python
-    retention_policies = [
+    # settings.py
+    DB_PURGE_RETENTION_POLICIES = [
         {
             'app_name': 'my_django_app',
             'model_name': 'MyModel',
@@ -53,7 +53,8 @@ pip install django-db-purge
         # Add more retention policies as needed
     ]
     ```
-5. Then, either periodically call the db_purge management command (e.g., via a system cronjob), or install and configure django-cron.
+    If `DB_PURGE_RETENTION_POLICIES` is not set, the command falls back to a placeholder policy that will fail validation until you configure it, so there's no risk of silently deleting the wrong table.
+4. Then, either periodically call the db_purge management command (e.g., via a system cronjob), or install and configure django-cron.
 
 ---
 
