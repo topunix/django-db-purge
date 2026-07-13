@@ -32,8 +32,50 @@ jobs:
           pip install ".${{ matrix.extra }}"
       - name: Run tests
         run: python runtests.py
+  wheel-smoke-test:
+    # Proves the built wheel actually contains dbpurge's code and that
+    # Django can discover its management commands. runtests.py alone
+    # cannot catch a wheel that ships no code: it imports dbpurge from
+    # this checkout, never through anything installed. Every step here
+    # after the build runs from outside the checkout for that reason.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-smoke-venv"
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/pip" install --quiet dist/*.whl
+      - name: Write a minimal settings module outside the checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/wheel-smoke-settings"
+          cat > "$RUNNER_TEMP/wheel-smoke-settings/settings.py" <<'EOF'
+          SECRET_KEY = "smoke"
+          INSTALLED_APPS = ["dbpurge"]
+          DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
+          USE_TZ = True
+          EOF
+      - name: Import the command modules and run --help, away from the checkout
+        working-directory: ${{ runner.temp }}
+        env:
+          DJANGO_SETTINGS_MODULE: settings
+          PYTHONPATH: ${{ runner.temp }}/wheel-smoke-settings
+        run: |
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/python" -c "
+          import dbpurge.management.commands.db_purge
+          import dbpurge.management.commands.purge_mcp_server
+          print('dbpurge command modules import cleanly from the installed wheel')
+          "
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/python" -m django help purge_mcp_server
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/python" -m django help db_purge
   publish:
-    needs: test
+    needs: [test, wheel-smoke-test]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
