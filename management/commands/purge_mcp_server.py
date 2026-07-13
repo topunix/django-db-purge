@@ -5,7 +5,11 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TypedDict
+
+try:
+    from typing_extensions import TypedDict
+except ImportError:
+    from typing import TypedDict
 
 from django.apps import apps
 from django.conf import settings

@@ -46,6 +46,7 @@ DATABASES = {
     }
 }
 USE_TZ = True
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Purgeable by default in tests only. Real deployments default to an
 # empty allowlist (see purge_mcp_server.py), so nothing is purgeable
