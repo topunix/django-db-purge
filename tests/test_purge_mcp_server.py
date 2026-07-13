@@ -16,6 +16,12 @@ from dbpurge.management.commands.purge_mcp_server import (
 from tests.models import SampleRecord
 
 
+def expire_token(token):
+    _TOKENS[token] = replace(
+        _TOKENS[token], expires_at=timezone.now() - timedelta(seconds=1)
+    )
+
+
 class TestListPurgeCandidates(TestCase):
     def test_includes_toy_model_date_columns(self):
         candidates = get_purge_candidates()
@@ -67,9 +73,7 @@ class TestPreviewPurgeCandidates(TestCase):
     def test_token_rejected_once_expired(self):
         preview = preview_purge_candidates(*self.params)
         token = preview["confirmation_token"]
-        _TOKENS[token] = replace(
-            _TOKENS[token], expires_at=timezone.now() - timedelta(seconds=1)
-        )
+        expire_token(token)
 
         self.assertFalse(token_is_valid(token, *self.params))
 
@@ -88,6 +92,13 @@ class TestPreviewPurgeCandidates(TestCase):
         with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
             with self.assertRaises(PurgePolicyError):
                 preview_purge_candidates(*self.params)
+
+    def test_allowlist_matches_regardless_of_casing(self):
+        # An operator naturally reaches for "tests.samplerecord", the
+        # lowercase form list_purge_candidates itself shows them, not
+        # the class-cased "tests.SampleRecord" label. Either must work.
+        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=["tests.samplerecord"]):
+            preview_purge_candidates(*self.params)
 
 
 class TestExecutePurgeCandidates(TestCase):
@@ -151,12 +162,16 @@ class TestExecutePurgeCandidates(TestCase):
         self.assertEqual(result["deleted_count"], 1)
         self.assertEqual(SampleRecord.objects.count(), 0)
 
+    def test_allowlist_matches_regardless_of_casing(self):
+        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=["tests.samplerecord"]):
+            result = execute_purge_candidates(*self.params, self.token)
+
+        self.assertEqual(result["deleted_count"], 1)
+
     def test_opaque_message_identical_for_unknown_expired_and_drifted_tokens(self):
         unknown_message = self._error_message_for("not-a-real-token", self.params)
 
-        _TOKENS[self.token] = replace(
-            _TOKENS[self.token], expires_at=timezone.now() - timedelta(seconds=1)
-        )
+        expire_token(self.token)
         expired_message = self._error_message_for(self.token, self.params)
 
         fresh_preview = preview_purge_candidates(*self.params)

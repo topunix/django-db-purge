@@ -12,7 +12,7 @@ from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from django.db.models import DateField, DateTimeField, Model
+from django.db.models import DateField, DateTimeField, Model, QuerySet
 from django.utils import timezone
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -80,8 +80,19 @@ def list_purge_candidates() -> dict[str, dict[str, list[str]]]:
 
 
 def _is_allowed_model(model: type[Model]) -> bool:
-    allowed = getattr(settings, "DB_PURGE_MCP_ALLOWED_MODELS", [])
-    return model._meta.label in allowed
+    """
+    Return whether model is listed in DB_PURGE_MCP_ALLOWED_MODELS.
+
+    Matched case-insensitively. The recommended format is Django's own
+    "app_label.ModelName" label (class-cased, e.g. "tests.SampleRecord"),
+    but list_purge_candidates surfaces model names in lowercase, so
+    either casing is accepted rather than silently rejecting whichever
+    one an operator copies in.
+    """
+    allowed = {
+        name.lower() for name in getattr(settings, "DB_PURGE_MCP_ALLOWED_MODELS", [])
+    }
+    return model._meta.label.lower() in allowed
 
 
 def validate_policy(
@@ -138,10 +149,19 @@ def _hash_params(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _evict_expired_tokens() -> None:
+    """Drop expired entries so _TOKENS does not grow without bound."""
+    now = timezone.now()
+    expired = [token for token, record in _TOKENS.items() if record.expires_at <= now]
+    for token in expired:
+        del _TOKENS[token]
+
+
 def issue_token(
     app_name: str, model_name: str, time_column: str, retention_seconds: int
 ) -> tuple[str, datetime]:
     """Issue a fresh confirmation token bound to the exact parameter set."""
+    _evict_expired_tokens()
     token = secrets.token_urlsafe(32)
     expires_at = timezone.now() + TOKEN_TTL
     _TOKENS[token] = _TokenRecord(
@@ -214,6 +234,19 @@ def _reinstate_token(token: str, record: _TokenRecord) -> None:
     _TOKENS[token] = record
 
 
+def _expired_queryset(
+    model: type[Model], time_column: str, retention_seconds: int
+) -> tuple[QuerySet, datetime]:
+    """
+    Return (rows older than retention_seconds, the cutoff used).
+
+    Shared by preview_purge_candidates and execute_purge_candidates so
+    the two can never silently disagree about which rows are expired.
+    """
+    cutoff = timezone.now() - timedelta(seconds=retention_seconds)
+    return model.objects.filter(**{f"{time_column}__lte": cutoff}), cutoff
+
+
 class PurgePreview(TypedDict):
     row_count: int
     sample_rows: list[dict[str, object]]
@@ -237,8 +270,7 @@ def preview_purge_candidates(
     confirmation token bound to these exact parameters.
     """
     model = validate_policy(app_name, model_name, time_column, retention_seconds)
-    cutoff = timezone.now() - timedelta(seconds=retention_seconds)
-    expired_records = model.objects.filter(**{f"{time_column}__lte": cutoff})
+    expired_records, cutoff = _expired_queryset(model, time_column, retention_seconds)
 
     row_count = expired_records.count()
     sample_rows = [
@@ -275,11 +307,13 @@ def preview_purge(
     Preview which rows a purge would delete, without deleting them.
 
     Validates app_name, model_name, and time_column against live model
-    introspection. Returns the matching row count, up to 5 sample rows
-    (primary key and time_column value only), a confirmation_token, and
-    token_expires_at. Pass the token and identical parameters to
-    execute_purge before it expires (5 minutes) to actually delete
-    rows. This tool performs no deletion.
+    introspection, and requires the model to be listed in
+    DB_PURGE_MCP_ALLOWED_MODELS (empty by default, so nothing is
+    purgeable until configured). Returns the matching row count, up to
+    5 sample rows (primary key and time_column value only), a
+    confirmation_token, and token_expires_at. Pass the token and
+    identical parameters to execute_purge before it expires (5 minutes)
+    to actually delete rows. This tool performs no deletion.
     """
     try:
         return preview_purge_candidates(app_name, model_name, time_column, retention_seconds)
@@ -305,16 +339,13 @@ def execute_purge_candidates(
     Requires confirmation_token to be valid for these exact parameters.
     The token is popped out of the store before it is checked, so at
     most one caller can ever consume a given token even if two
-    execute_purge calls race (a client retry firing the same call
-    twice, or two concurrent requests). Any mismatch, expiry, or
-    unknown token raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the
-    same message regardless of which of those it was. On success the
-    token stays consumed (single-use). If the call then fails for a
-    reason that is not the caller's fault (a row-cap breach, or an
-    unexpected error during delete), the token is put back so a retry
-    with the same token can still succeed: only whoever actually holds
-    a legitimate, still-valid token gets to retry, since the pop
-    already rejected anyone else racing for the same token.
+    execute_purge calls race. Any mismatch, expiry, or unknown token
+    raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the same message
+    regardless of which of those it was. On success the token stays
+    consumed (single-use). If the call then fails for a reason that is
+    not the caller's fault (a row-cap breach, or an unexpected error
+    during delete), the token is put back so a retry with the same
+    token can still succeed.
 
     DB_PURGE_MCP_MAX_ROWS bounds the number of *matching* rows (the
     same count preview_purge reports and what is re-checked here right
@@ -332,12 +363,13 @@ def execute_purge_candidates(
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
 
     max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
-    cutoff = timezone.now() - timedelta(seconds=retention_seconds)
 
-    start_time = time.time()
+    start_time = time.monotonic()
     try:
         with transaction.atomic():
-            expired_records = model.objects.filter(**{f"{time_column}__lte": cutoff})
+            expired_records, cutoff = _expired_queryset(
+                model, time_column, retention_seconds
+            )
             # count() and delete() are two separate queries. A concurrent
             # writer can still insert or update a row matching this filter
             # between them, even inside this transaction, so the row cap
@@ -352,12 +384,15 @@ def execute_purge_candidates(
     except Exception:
         _reinstate_token(confirmation_token, record)
         raise
-    took = time.time() - start_time
+    took = time.monotonic() - start_time
 
     logger.info(
-        "Executed purge of %s %s: deleted %s rows older than %s (took %.3fs)",
+        "Executed purge of %s.%s.%s (retention=%ss): deleted %s rows older than %s "
+        "(took %.3fs)",
         app_name,
         model_name,
+        time_column,
+        retention_seconds,
         deleted_total,
         cutoff,
         took,
@@ -380,7 +415,10 @@ def execute_purge(
     """
     Delete rows matched by a prior, still-valid preview_purge call.
 
-    Requires an exact parameter match against a preview_purge call,
+    Requires the model to be listed in DB_PURGE_MCP_ALLOWED_MODELS
+    (empty by default, so nothing is purgeable until configured), the
+    same check preview_purge already applied, re-verified here. Also
+    requires an exact parameter match against a preview_purge call,
     using the confirmation_token it returned, within that token's 5
     minute lifetime. An unknown token, an expired token, and a token
     whose parameters no longer match all fail with the identical
