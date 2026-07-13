@@ -13,7 +13,7 @@ with open(os.path.join(BASE_DIR, 'README.md')) as f:
 setup(
     name='django-db-purge',
     version='1.2.0',
-    packages=find_packages(),
+    packages=find_packages(exclude=['tests', 'tests.*']),
     description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
     long_description_content_type="text/markdown",
     long_description = long_description,
