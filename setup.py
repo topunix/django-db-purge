@@ -5,7 +5,7 @@ from setuptools import find_packages, setup
 os.chdir(os.path.normpath(os.path.join(os.path.abspath(__file__), os.pardir)))
 
 # get README
-with open('README.rst') as f:
+with open('README.md') as f:
     long_description = f.read()
 
 setup(
@@ -15,6 +15,7 @@ setup(
     description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
     long_description_content_type="text/markdown",
     long_description = long_description,
+    python_requires='>=3.10',
     install_requires=['Django>=2'],
     extras_require={'mcp': ['fastmcp>=3.0']},
     url='https://github.com/topunix/django-db-purge',

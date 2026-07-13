@@ -1,0 +1,51 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - python-version: "3.10"
+            extra: ""
+          - python-version: "3.12"
+            extra: ""
+          - python-version: "3.10"
+            extra: "[mcp]"
+          - python-version: "3.12"
+            extra: "[mcp]"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".${{ matrix.extra }}"
+      - name: Run tests
+        run: python runtests.py
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build package
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
