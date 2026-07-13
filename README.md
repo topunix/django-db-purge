@@ -65,6 +65,16 @@ pip install django-db-purge
 
 django-db-purge also ships an MCP server that exposes the same purge logic to an AI agent, with guardrails so an agent can never delete rows without a human-verifiable preview step. It runs inside Django as a management command and speaks the MCP protocol over stdio, so it works with Claude Desktop, the MCP Inspector, or any other MCP-capable host. The server makes no LLM API calls of its own: the host runs the model, and this process only exposes deterministic, schema-validated tools.
 
+### Installation
+
+The MCP server needs `fastmcp`, which is an optional extra, not part of the base install:
+
+```bash
+pip install django-db-purge[mcp]
+```
+
+If `fastmcp` is not installed, running `purge_mcp_server` fails immediately with a `CommandError` pointing back at this install command, rather than a raw import traceback.
+
 ### Tools
 
 - **`list_purge_candidates()`**
@@ -135,7 +145,7 @@ A healthy `tools/list` response shows all three tools: `list_purge_candidates`, 
 
 ### Running the tests
 
-From a bare checkout, with Django and `fastmcp` installed (`pip install Django fastmcp`), no separate install step for this package itself is required:
+From a bare checkout, with this package installed with the `mcp` extra (`pip install -e .[mcp]`), no separate install step for Django or `fastmcp` is required:
 
 ```bash
 python runtests.py

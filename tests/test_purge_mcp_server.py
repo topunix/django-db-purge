@@ -1,10 +1,13 @@
 from dataclasses import replace
 from datetime import timedelta
+from unittest.mock import patch
 
+from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from dbpurge.management.commands.purge_mcp_server import (
+    MISSING_FASTMCP_ERROR,
     TOKEN_ERROR_MESSAGE,
     PurgePolicyError,
     _TOKENS,
@@ -183,3 +186,12 @@ class TestExecutePurgeCandidates(TestCase):
         self.assertEqual(unknown_message, TOKEN_ERROR_MESSAGE)
         self.assertEqual(expired_message, TOKEN_ERROR_MESSAGE)
         self.assertEqual(drifted_message, TOKEN_ERROR_MESSAGE)
+
+
+class TestMissingFastMCP(TestCase):
+    @patch("dbpurge.management.commands.purge_mcp_server.FastMCP", None)
+    def test_handle_raises_a_command_error_pointing_at_the_extra(self):
+        with self.assertRaises(CommandError) as ctx:
+            call_command("purge_mcp_server")
+
+        self.assertEqual(str(ctx.exception), MISSING_FASTMCP_ERROR)

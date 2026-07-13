@@ -10,16 +10,36 @@ from typing import TypedDict
 from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import DateField, DateTimeField, Model, QuerySet
 from django.utils import timezone
-from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+
+try:
+    from fastmcp import FastMCP
+    from fastmcp.exceptions import ToolError
+except ImportError:
+    FastMCP = None
+
+    class ToolError(Exception):
+        """Stand-in for fastmcp.exceptions.ToolError when fastmcp is absent."""
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("django-db-purge")
+MISSING_FASTMCP_ERROR = (
+    "fastmcp is required to run the MCP server. Install it with "
+    "pip install django-db-purge[mcp]."
+)
+
+
+class _MissingMCP:
+    """Stand-in for FastMCP when fastmcp is absent, so this module stays importable."""
+
+    def tool(self, fn):
+        return fn
+
+
+mcp = FastMCP("django-db-purge") if FastMCP is not None else _MissingMCP()
 
 TOKEN_TTL = timedelta(minutes=5)
 PREVIEW_SAMPLE_SIZE = 5
@@ -466,6 +486,8 @@ class Command(BaseCommand):
     help = "Run the django-db-purge MCP server over stdio"
 
     def handle(self, *args, **options):
+        if FastMCP is None:
+            raise CommandError(MISSING_FASTMCP_ERROR)
         configure_stderr_logging()
         logger.info("Starting django-db-purge MCP server over stdio")
         mcp.run(transport="stdio")
