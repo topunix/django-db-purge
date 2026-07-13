@@ -1,11 +1,14 @@
 from dataclasses import replace
 from datetime import timedelta
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from dbpurge.management.commands.purge_mcp_server import (
+    TOKEN_ERROR_MESSAGE,
+    PurgePolicyError,
     _TOKENS,
+    execute_purge_candidates,
     get_purge_candidates,
     preview_purge_candidates,
     token_is_valid,
@@ -80,3 +83,69 @@ class TestPreviewPurgeCandidates(TestCase):
 
     def test_unknown_token_rejected(self):
         self.assertFalse(token_is_valid("not-a-real-token", *self.params))
+
+    def test_denied_for_a_model_outside_the_allowlist(self):
+        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
+            with self.assertRaises(PurgePolicyError):
+                preview_purge_candidates(*self.params)
+
+
+class TestExecutePurgeCandidates(TestCase):
+    def setUp(self):
+        self.old_record = SampleRecord.objects.create(
+            created_at=timezone.now() - timedelta(days=10), label="old"
+        )
+        self.params = ("tests", "samplerecord", "created_at", 3600)
+        preview = preview_purge_candidates(*self.params)
+        self.token = preview["confirmation_token"]
+
+    def _error_message_for(self, token, params):
+        with self.assertRaises(PurgePolicyError) as ctx:
+            execute_purge_candidates(*params, token)
+        return str(ctx.exception)
+
+    def test_deletes_matching_rows_and_returns_the_real_total(self):
+        result = execute_purge_candidates(*self.params, self.token)
+
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(SampleRecord.objects.count(), 0)
+
+    def test_token_is_single_use(self):
+        execute_purge_candidates(*self.params, self.token)
+
+        message = self._error_message_for(self.token, self.params)
+
+        self.assertEqual(message, TOKEN_ERROR_MESSAGE)
+
+    def test_denied_for_a_model_outside_the_allowlist(self):
+        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
+            with self.assertRaises(PurgePolicyError):
+                execute_purge_candidates(*self.params, self.token)
+
+        self.assertEqual(SampleRecord.objects.count(), 1)
+
+    def test_cap_breach_blocks_delete_and_leaves_token_usable(self):
+        with override_settings(DB_PURGE_MCP_MAX_ROWS=0):
+            with self.assertRaises(PurgePolicyError):
+                execute_purge_candidates(*self.params, self.token)
+
+        self.assertEqual(SampleRecord.objects.count(), 1)
+        self.assertTrue(token_is_valid(self.token, *self.params))
+
+    def test_opaque_message_identical_for_unknown_expired_and_drifted_tokens(self):
+        unknown_message = self._error_message_for("not-a-real-token", self.params)
+
+        _TOKENS[self.token] = replace(
+            _TOKENS[self.token], expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        expired_message = self._error_message_for(self.token, self.params)
+
+        fresh_preview = preview_purge_candidates(*self.params)
+        drifted_params = ("tests", "samplerecord", "created_at", 7200)
+        drifted_message = self._error_message_for(
+            fresh_preview["confirmation_token"], drifted_params
+        )
+
+        self.assertEqual(unknown_message, TOKEN_ERROR_MESSAGE)
+        self.assertEqual(expired_message, TOKEN_ERROR_MESSAGE)
+        self.assertEqual(drifted_message, TOKEN_ERROR_MESSAGE)

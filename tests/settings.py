@@ -46,3 +46,8 @@ DATABASES = {
     }
 }
 USE_TZ = True
+
+# Purgeable by default in tests only. Real deployments default to an
+# empty allowlist (see purge_mcp_server.py), so nothing is purgeable
+# until explicitly configured.
+DB_PURGE_MCP_ALLOWED_MODELS = ["tests.SampleRecord"]

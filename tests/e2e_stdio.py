@@ -138,6 +138,38 @@ async def run_checks(db_path: str) -> None:
         )
         if not bad_column.get("isError"):
             fail(f"expected an error for a non-date column, got {bad_column}")
+
+        execute_args = {
+            "app_name": "tests",
+            "model_name": "samplerecord",
+            "time_column": "created_at",
+            "retention_seconds": 3600,
+            "confirmation_token": candidates["confirmation_token"],
+        }
+        executed = await call_tool(proc, 5, "execute_purge", execute_args)
+        if executed.get("isError"):
+            fail(f"execute_purge returned an error for a valid token: {executed}")
+        result = executed["structuredContent"]
+        if result["deleted_count"] != 1:
+            fail(f"expected deleted_count 1, got {result}")
+
+        reused = await call_tool(proc, 6, "execute_purge", execute_args)
+        if not reused.get("isError"):
+            fail(f"expected a reused (already-consumed) token to be rejected, got {reused}")
+
+        after_delete = await call_tool(
+            proc,
+            7,
+            "preview_purge",
+            {
+                "app_name": "tests",
+                "model_name": "samplerecord",
+                "time_column": "created_at",
+                "retention_seconds": 3600,
+            },
+        )
+        if after_delete["structuredContent"]["row_count"] != 0:
+            fail(f"expected the stale row to be gone, got {after_delete}")
     finally:
         proc.stdin.close()
         try:

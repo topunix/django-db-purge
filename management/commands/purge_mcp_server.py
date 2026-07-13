@@ -2,14 +2,17 @@ import hashlib
 import logging
 import secrets
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TypedDict
 
 from django.apps import apps
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import DateField, DateTimeField, Model
 from django.core.management.base import BaseCommand
+from django.db import transaction
+from django.db.models import DateField, DateTimeField, Model
 from django.utils import timezone
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -20,6 +23,8 @@ mcp = FastMCP("django-db-purge")
 
 TOKEN_TTL = timedelta(minutes=5)
 PREVIEW_SAMPLE_SIZE = 5
+DEFAULT_MAX_ROWS = 10000
+TOKEN_ERROR_MESSAGE = "invalid or expired confirmation token"
 
 
 class PurgePolicyError(Exception):
@@ -74,6 +79,11 @@ def list_purge_candidates() -> dict[str, dict[str, list[str]]]:
     return get_purge_candidates()
 
 
+def _is_allowed_model(model: type[Model]) -> bool:
+    allowed = getattr(settings, "DB_PURGE_MCP_ALLOWED_MODELS", [])
+    return model._meta.label in allowed
+
+
 def validate_policy(
     app_name: str,
     model_name: str,
@@ -84,14 +94,22 @@ def validate_policy(
     Validate a purge policy against live schema and return the model.
 
     Shared guard for preview_purge and execute_purge. Raises
-    PurgePolicyError if the model does not exist, time_column is not a
-    real DateField/DateTimeField on it, or retention_seconds is not a
+    PurgePolicyError if the model does not exist, is not in the
+    DB_PURGE_MCP_ALLOWED_MODELS allowlist (empty by default, meaning
+    nothing is purgeable until configured), time_column is not a real
+    DateField/DateTimeField on it, or retention_seconds is not a
     positive integer.
     """
     try:
         model = apps.get_model(app_label=app_name, model_name=model_name)
     except LookupError:
         raise PurgePolicyError(f"Model '{model_name}' in app '{app_name}' not found")
+
+    if not _is_allowed_model(model):
+        raise PurgePolicyError(
+            f"Model '{model._meta.label}' is not in DB_PURGE_MCP_ALLOWED_MODELS "
+            "and cannot be purged via MCP"
+        )
 
     try:
         field = model._meta.get_field(time_column)
@@ -159,6 +177,11 @@ def token_is_valid(
     ):
         return False
     return True
+
+
+def consume_token(token: str) -> None:
+    """Invalidate token so it cannot be used again. Tokens are single-use."""
+    _TOKENS.pop(token, None)
 
 
 class PurgePreview(TypedDict):
@@ -230,6 +253,111 @@ def preview_purge(
     """
     try:
         return preview_purge_candidates(app_name, model_name, time_column, retention_seconds)
+    except PurgePolicyError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+class PurgeResult(TypedDict):
+    deleted_count: int
+    duration_seconds: float
+
+
+def execute_purge_candidates(
+    app_name: str,
+    model_name: str,
+    time_column: str,
+    retention_seconds: int,
+    confirmation_token: str,
+) -> PurgeResult:
+    """
+    Delete rows matched by a prior, still-valid preview_purge call.
+
+    Requires confirmation_token to be valid for these exact parameters
+    (see token_is_valid). Any mismatch, expiry, or unknown token raises
+    PurgePolicyError(TOKEN_ERROR_MESSAGE), the same message regardless
+    of which of those it was, and leaves the token unconsumed. On
+    success the token is consumed (single-use): a second execute call
+    with the same token fails the same way a bad token would.
+
+    DB_PURGE_MCP_MAX_ROWS bounds the number of *matching* rows (the
+    same count preview_purge reports and what is re-checked here right
+    before deleting), not cascade fan-out: ON DELETE CASCADE relations
+    can remove additional related rows this cap does not account for.
+    The deleted_count returned and logged is delete()'s own return
+    value, which does include those cascades.
+    """
+    model = validate_policy(app_name, model_name, time_column, retention_seconds)
+
+    if not token_is_valid(
+        confirmation_token, app_name, model_name, time_column, retention_seconds
+    ):
+        raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
+
+    max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
+    cutoff = timezone.now() - timedelta(seconds=retention_seconds)
+
+    start_time = time.time()
+    with transaction.atomic():
+        expired_records = model.objects.filter(**{f"{time_column}__lte": cutoff})
+        # count() and delete() are two separate queries. A concurrent
+        # writer can still insert or update a row matching this filter
+        # between them, even inside this transaction, so the row cap
+        # below is a coarse safety net rather than an exact guarantee.
+        row_count = expired_records.count()
+        if row_count > max_rows:
+            raise PurgePolicyError(
+                f"Purge would match {row_count} rows, exceeding the configured "
+                f"max of {max_rows} (DB_PURGE_MCP_MAX_ROWS). Refusing to execute."
+            )
+        deleted_total, deleted_by_model = expired_records.delete()
+    took = time.time() - start_time
+
+    consume_token(confirmation_token)
+
+    logger.info(
+        "Executed purge of %s %s: deleted %s rows older than %s (took %.3fs)",
+        app_name,
+        model_name,
+        deleted_total,
+        cutoff,
+        took,
+    )
+    logger.debug(
+        "Purge delete breakdown for %s %s: %s", app_name, model_name, deleted_by_model
+    )
+
+    return {"deleted_count": deleted_total, "duration_seconds": took}
+
+
+@mcp.tool
+def execute_purge(
+    app_name: str,
+    model_name: str,
+    time_column: str,
+    retention_seconds: int,
+    confirmation_token: str,
+) -> PurgeResult:
+    """
+    Delete rows matched by a prior, still-valid preview_purge call.
+
+    Requires an exact parameter match against a preview_purge call,
+    using the confirmation_token it returned, within that token's 5
+    minute lifetime. An unknown token, an expired token, and a token
+    whose parameters no longer match all fail with the identical
+    "invalid or expired confirmation token" message, by design:
+    callers cannot distinguish why a token was rejected. Tokens are
+    single-use, consumed only on a successful delete.
+
+    DB_PURGE_MCP_MAX_ROWS is re-checked against the live matching row
+    count at execute time, even if preview_purge saw a count under the
+    cap. It bounds matching rows, not cascade fan-out from related
+    models; the deleted_count returned here is the real total,
+    cascades included.
+    """
+    try:
+        return execute_purge_candidates(
+            app_name, model_name, time_column, retention_seconds, confirmation_token
+        )
     except PurgePolicyError as exc:
         raise ToolError(str(exc)) from exc
 
