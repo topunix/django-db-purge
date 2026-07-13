@@ -2,7 +2,7 @@
 
 ## Django Database Purge
 
-The Django Database Purge management command is a tool for efficiently removing unwanted records from your Django project's database based on a specified retention policy. This command helps you keep your database clean and optimized by permanently deleting records that are no longer needed.
+django-db-purge deletes expired database records based on configurable retention policies, run as a scheduled Django management command. It also ships an MCP server so an AI agent can purge records too, safely, behind a preview, token, execute handshake.
 
 ### Features:
 
@@ -10,6 +10,9 @@ The Django Database Purge management command is a tool for efficiently removing 
 - **Efficient Data Management**: Easily manage the size of your database by removing outdated or unnecessary records.
 - **Customizable**: Adapt the command to suit your project's specific requirements and database structure.
 - **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
+- **Agent-safe MCP tools**: Optionally let an AI agent purge records through a preview, token, execute handshake that blocks deletion without a matching prior preview.
+
+## Scheduled purging (cron)
 
 ### How to Use:
 1. Install django-db-purge by running:
