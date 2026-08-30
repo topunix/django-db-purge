@@ -15,7 +15,7 @@ from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import DateField, DateTimeField, Model, QuerySet
 from django.utils import timezone
 
@@ -55,10 +55,17 @@ class PurgePolicyError(Exception):
     """Raised when preview/execute parameters fail validation."""
 
 
+class PurgeRowSetChangedError(PurgePolicyError):
+    """Raised when the matched row set differs between preview and execute."""
+
+
 @dataclass(frozen=True)
 class _TokenRecord:
     params_hash: str
     expires_at: datetime
+    pk_list: tuple[int, ...]
+    fingerprint: str
+    preview_row_count: int
 
 
 # In-process token store, fine for a single stdio server process where
@@ -181,16 +188,69 @@ def _evict_expired_tokens() -> None:
         del _TOKENS[token]
 
 
+def _fingerprint_fields_for(model: type[Model]) -> tuple[str, ...]:
+    """
+    Return the extra columns DB_PURGE_MCP_FINGERPRINT_FIELDS configures
+    for model, to include in its row-set fingerprint alongside the
+    primary key.
+
+    Matched case-insensitively against model._meta.label, mirroring
+    DB_PURGE_MCP_ALLOWED_MODELS. Empty by default, so fingerprinting is
+    PK-only unless a model opts in: not every model has an updated_at
+    or version column to hash for in-place mutation detection.
+    """
+    configured = getattr(settings, "DB_PURGE_MCP_FINGERPRINT_FIELDS", {})
+    for label, fields in configured.items():
+        if label.lower() == model._meta.label.lower():
+            return tuple(fields)
+    return ()
+
+
+def _row_set_snapshot(
+    queryset: QuerySet,
+    time_column: str,
+    fingerprint_fields: tuple[str, ...],
+    limit: int,
+) -> tuple[tuple[int, ...], str]:
+    """
+    Return (pk_list, fingerprint) for up to limit rows of queryset.
+
+    Rows are selected in (time_column, pk) order so that, when there
+    are more matches than limit, the slice taken is deterministic.
+    The selected rows are then sorted by pk alone before the pk_list
+    and the fingerprint hash are built: time_column (and any other
+    non-fingerprinted column) can change value between preview and
+    execute without reordering an otherwise-unchanged set of rows, and
+    an ordering artifact must not masquerade as row-set drift.
+    """
+    columns = ("pk", *fingerprint_fields)
+    rows = list(queryset.order_by(time_column, "pk").values_list(*columns)[:limit])
+    rows.sort(key=lambda row: row[0])
+    pk_list = tuple(row[0] for row in rows)
+    raw = "|".join(",".join(str(value) for value in row) for row in rows)
+    fingerprint = hashlib.sha256(raw.encode()).hexdigest()
+    return pk_list, fingerprint
+
+
 def issue_token(
-    app_name: str, model_name: str, time_column: str, retention_seconds: int
+    app_name: str,
+    model_name: str,
+    time_column: str,
+    retention_seconds: int,
+    pk_list: tuple[int, ...],
+    fingerprint: str,
+    preview_row_count: int,
 ) -> tuple[str, datetime]:
-    """Issue a fresh confirmation token bound to the exact parameter set."""
+    """Issue a fresh confirmation token bound to the parameters and row set."""
     _evict_expired_tokens()
     token = secrets.token_urlsafe(32)
     expires_at = timezone.now() + TOKEN_TTL
     _TOKENS[token] = _TokenRecord(
         params_hash=_hash_params(app_name, model_name, time_column, retention_seconds),
         expires_at=expires_at,
+        pk_list=pk_list,
+        fingerprint=fingerprint,
+        preview_row_count=preview_row_count,
     )
     return token, expires_at
 
@@ -291,7 +351,10 @@ def preview_purge_candidates(
     where time_column is older than retention_seconds. Returns the
     total match count, up to PREVIEW_SAMPLE_SIZE sample rows (primary
     key and time_column value only, never the full row), and a fresh
-    confirmation token bound to these exact parameters.
+    confirmation token bound to these exact parameters and to a
+    fingerprint of the matched row set (see _row_set_snapshot), so
+    execute_purge can detect drift instead of trusting the parameters
+    alone.
     """
     model = validate_policy(app_name, model_name, time_column, retention_seconds)
     expired_records, cutoff = _expired_queryset(model, time_column, retention_seconds)
@@ -302,7 +365,21 @@ def preview_purge_candidates(
         for obj in expired_records.order_by(time_column)[:PREVIEW_SAMPLE_SIZE]
     ]
 
-    token, expires_at = issue_token(app_name, model_name, time_column, retention_seconds)
+    max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
+    fingerprint_fields = _fingerprint_fields_for(model)
+    pk_list, fingerprint = _row_set_snapshot(
+        expired_records, time_column, fingerprint_fields, max_rows
+    )
+
+    token, expires_at = issue_token(
+        app_name,
+        model_name,
+        time_column,
+        retention_seconds,
+        pk_list,
+        fingerprint,
+        row_count,
+    )
 
     logger.info(
         "Previewed purge of %s %s: %s rows older than %s",
@@ -365,11 +442,11 @@ def execute_purge_candidates(
     most one caller can ever consume a given token even if two
     execute_purge calls race. Any mismatch, expiry, or unknown token
     raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the same message
-    regardless of which of those it was. On success the token stays
-    consumed (single-use). If the call then fails for a reason that is
-    not the caller's fault (a row-cap breach, or an unexpected error
-    during delete), the token is put back so a retry with the same
-    token can still succeed.
+    regardless of which of those it was. The token is consumed only
+    once the delete actually succeeds: if the call fails for any
+    reason first, including a row-cap breach or a row-set fingerprint
+    mismatch (see below), the token is put back so a retry with the
+    same token can still succeed within its TTL.
 
     DB_PURGE_MCP_MAX_ROWS bounds the number of *matching* rows (the
     same count preview_purge reports and what is re-checked here right
@@ -377,6 +454,25 @@ def execute_purge_candidates(
     can remove additional related rows this cap does not account for.
     The deleted_count returned and logged is delete()'s own return
     value, which does include those cascades.
+
+    Deletion targets the exact primary keys preview_purge captured,
+    not a re-run of the retention filter: a row that starts matching
+    the filter after preview (a phantom insert) is structurally
+    excluded, since it was never in that PK list. Before deleting,
+    this re-runs the filter and recomputes the row-set fingerprint
+    (PKs, plus any DB_PURGE_MCP_FINGERPRINT_FIELDS columns configured
+    for the model) to detect drift, PKs that left or joined the match
+    set, or (only with fingerprint_fields configured) in-place
+    mutation of a still-matching row. A fingerprint mismatch raises
+    PurgeRowSetChangedError naming the previewed and current row
+    counts, and never retries or reissues a token automatically:
+    the caller must run preview_purge again. Where the database
+    backend supports SELECT ... FOR UPDATE (connection.features.
+    has_select_for_update), the re-check locks the candidate rows for
+    the rest of the transaction; on backends that do not (e.g. SQLite)
+    this is skipped rather than raised or degraded, since delete-by-PK
+    already makes phantom inserts harmless and the lock is a nicety on
+    top of that, not the safety mechanism.
     """
     model = validate_policy(app_name, model_name, time_column, retention_seconds)
 
@@ -387,6 +483,7 @@ def execute_purge_candidates(
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
 
     max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
+    fingerprint_fields = _fingerprint_fields_for(model)
 
     start_time = time.monotonic()
     try:
@@ -394,17 +491,33 @@ def execute_purge_candidates(
             expired_records, cutoff = _expired_queryset(
                 model, time_column, retention_seconds
             )
-            # count() and delete() are two separate queries. A concurrent
-            # writer can still insert or update a row matching this filter
-            # between them, even inside this transaction, so the row cap
-            # below is a coarse safety net rather than an exact guarantee.
+            if connection.features.has_select_for_update:
+                expired_records = expired_records.select_for_update()
+
+            # count() and the fingerprint re-check below are separate
+            # queries from the eventual delete, so the row cap and the
+            # fingerprint are both coarse safety nets rather than exact
+            # guarantees on backends without row locking.
             row_count = expired_records.count()
             if row_count > max_rows:
                 raise PurgePolicyError(
                     f"Purge would match {row_count} rows, exceeding the configured "
                     f"max of {max_rows} (DB_PURGE_MCP_MAX_ROWS). Refusing to execute."
                 )
-            deleted_total, deleted_by_model = expired_records.delete()
+
+            _, current_fingerprint = _row_set_snapshot(
+                expired_records, time_column, fingerprint_fields, max_rows
+            )
+            if current_fingerprint != record.fingerprint:
+                raise PurgeRowSetChangedError(
+                    "The matched row set has changed since preview_purge "
+                    f"(previewed {record.preview_row_count} row(s), now {row_count}). "
+                    "Run preview_purge again and execute with its new token."
+                )
+
+            deleted_total, deleted_by_model = model.objects.filter(
+                pk__in=record.pk_list
+            ).delete()
     except Exception:
         _reinstate_token(confirmation_token, record)
         raise
@@ -448,16 +561,27 @@ def execute_purge(
     whose parameters no longer match all fail with the identical
     "invalid or expired confirmation token" message, by design:
     callers cannot distinguish why a token was rejected. Tokens are
-    single-use: consumed as soon as this call starts, and restored if
-    the call then fails for a reason that is not the caller's fault
-    (for example a row-cap breach), so a retry with the same token can
-    still succeed.
+    single-use: only consumed once this call's delete actually
+    succeeds. If the call fails for any other reason (a row-cap
+    breach, or a row-set fingerprint mismatch), the token is restored
+    so a retry with the same token can still succeed within its TTL.
 
     DB_PURGE_MCP_MAX_ROWS is re-checked against the live matching row
     count at execute time, even if preview_purge saw a count under the
     cap. It bounds matching rows, not cascade fan-out from related
     models; the deleted_count returned here is the real total,
     cascades included.
+
+    The token also binds a fingerprint of the exact row set
+    preview_purge matched (their primary keys, plus any
+    DB_PURGE_MCP_FINGERPRINT_FIELDS columns configured for the model).
+    Deletion is by that PK list, not a re-run of the filter, so rows
+    that start matching only after preview are never touched. Before
+    deleting, the filter is re-run and the fingerprint recomputed; a
+    mismatch (rows added, removed, or, with fingerprint_fields
+    configured, mutated in place) fails the call with a distinct
+    "row set changed" error naming the previewed and current row
+    counts, rather than deleting a set the caller never saw.
     """
     try:
         return execute_purge_candidates(
