@@ -3,6 +3,8 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.core.management import CommandError, call_command
+from django.db import connection
+from django.db.models import QuerySet
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -10,6 +12,7 @@ from dbpurge.management.commands.purge_mcp_server import (
     MISSING_FASTMCP_ERROR,
     TOKEN_ERROR_MESSAGE,
     PurgePolicyError,
+    PurgeRowSetChangedError,
     _TOKENS,
     execute_purge_candidates,
     get_purge_candidates,
@@ -186,6 +189,146 @@ class TestExecutePurgeCandidates(TestCase):
         self.assertEqual(unknown_message, TOKEN_ERROR_MESSAGE)
         self.assertEqual(expired_message, TOKEN_ERROR_MESSAGE)
         self.assertEqual(drifted_message, TOKEN_ERROR_MESSAGE)
+
+
+class TestRowSetFingerprinting(TestCase):
+    def setUp(self):
+        self.old_record = SampleRecord.objects.create(
+            created_at=timezone.now() - timedelta(days=10), label="old"
+        )
+        self.params = ("tests", "samplerecord", "created_at", 3600)
+
+    def test_fingerprint_matches_execute_succeeds(self):
+        preview = preview_purge_candidates(*self.params)
+
+        result = execute_purge_candidates(*self.params, preview["confirmation_token"])
+
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(SampleRecord.objects.count(), 0)
+
+    def test_row_inserted_into_match_set_rejects_execute(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        SampleRecord.objects.create(
+            created_at=timezone.now() - timedelta(days=11), label="phantom"
+        )
+
+        with self.assertRaises(PurgeRowSetChangedError):
+            execute_purge_candidates(*self.params, token)
+
+        self.assertEqual(SampleRecord.objects.count(), 2)
+
+    def test_row_removed_from_match_set_rejects_execute(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        self.old_record.delete()
+
+        with self.assertRaises(PurgeRowSetChangedError):
+            execute_purge_candidates(*self.params, token)
+
+    def test_row_mutated_out_of_filter_rejects_execute(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        self.old_record.created_at = timezone.now()
+        self.old_record.save()
+
+        with self.assertRaises(PurgeRowSetChangedError):
+            execute_purge_candidates(*self.params, token)
+
+        self.assertEqual(SampleRecord.objects.count(), 1)
+
+    def test_row_mutated_but_still_matching_pk_only_default_execute_succeeds(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        self.old_record.label = "renamed"
+        self.old_record.save()
+
+        result = execute_purge_candidates(*self.params, token)
+
+        self.assertEqual(result["deleted_count"], 1)
+
+    def test_row_mutated_with_fingerprint_fields_configured_rejects_execute(self):
+        with override_settings(
+            DB_PURGE_MCP_FINGERPRINT_FIELDS={"tests.SampleRecord": ["label"]}
+        ):
+            preview = preview_purge_candidates(*self.params)
+            token = preview["confirmation_token"]
+
+            self.old_record.label = "renamed"
+            self.old_record.save()
+
+            with self.assertRaises(PurgeRowSetChangedError):
+                execute_purge_candidates(*self.params, token)
+
+    def test_unrelated_writes_do_not_affect_the_fingerprint(self):
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        # A write to a row that does not, and never did, match the
+        # retention filter must not perturb the fingerprint.
+        SampleRecord.objects.create(created_at=timezone.now(), label="unrelated")
+
+        result = execute_purge_candidates(*self.params, token)
+
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(SampleRecord.objects.count(), 1)
+
+    def test_fingerprint_mismatch_reinstates_the_token(self):
+        # Corrected design decision: drift is not caller error, so it
+        # follows the same reinstate-on-failure path as a cap breach
+        # rather than permanently burning the token.
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        self.old_record.delete()
+
+        with self.assertRaises(PurgeRowSetChangedError):
+            execute_purge_candidates(*self.params, token)
+
+        self.assertTrue(token_is_valid(token, *self.params))
+
+    def test_execute_succeeds_on_backend_without_select_for_update_support(self):
+        # Proves execute still works when the backend can't lock rows
+        # (true of SQLite here); it does NOT exercise the gate itself,
+        # since has_select_for_update is False so select_for_update()
+        # is never called. See test_select_for_update_applied_when_
+        # backend_supports_it for that.
+        self.assertFalse(connection.features.has_select_for_update)
+
+        preview = preview_purge_candidates(*self.params)
+
+        result = execute_purge_candidates(*self.params, preview["confirmation_token"])
+
+        self.assertEqual(result["deleted_count"], 1)
+
+    def test_select_for_update_applied_when_backend_supports_it(self):
+        # SQLite itself can't run SELECT ... FOR UPDATE, so
+        # select_for_update() is mocked at the queryset level (as a
+        # no-op passthrough) rather than actually exercised against
+        # the database; only the has_select_for_update gate and the
+        # call are under test here.
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        def passthrough_select_for_update(self, *args, **kwargs):
+            return self
+
+        with patch.object(
+            connection.features, "has_select_for_update", True
+        ), patch.object(
+            QuerySet,
+            "select_for_update",
+            autospec=True,
+            side_effect=passthrough_select_for_update,
+        ) as mock_select_for_update:
+            result = execute_purge_candidates(*self.params, token)
+
+        mock_select_for_update.assert_called_once()
+        self.assertEqual(result["deleted_count"], 1)
 
 
 class TestMissingFastMCP(TestCase):

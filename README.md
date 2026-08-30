@@ -11,6 +11,7 @@ django-db-purge deletes expired database records based on configurable retention
 - **Customizable**: Adapt the command to suit your project's specific requirements and database structure.
 - **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
 - **Agent-safe MCP tools**: Optionally let an AI agent purge records through a preview, token, execute handshake that blocks deletion without a matching prior preview.
+- **Row-set bound deletion**: A preview binds the exact rows it matched. Execution deletes only those rows, by primary key, and rejects the call outright if the row set drifted in between, so a concurrent write can never widen a purge.
 
 ## Scheduled purging (cron)
 
@@ -84,7 +85,7 @@ If `fastmcp` is not installed, running `purge_mcp_server` fails immediately with
   Read-only. Validates the policy against live schema, counts matching rows, and returns up to 5 sample rows (primary key and the time column only, never the full row), a `confirmation_token`, and `token_expires_at`. Performs no deletion.
 
 - **`execute_purge(app_name, model_name, time_column, retention_seconds, confirmation_token)`**
-  Deletes the matching rows, but only with a `confirmation_token` from a matching `preview_purge` call. Any unknown token, expired token, or parameter mismatch fails with the same "invalid or expired confirmation token" error, so a caller can't distinguish which of those it was.
+  Deletes the rows a `preview_purge` call matched, but only with that call's `confirmation_token`. Any unknown token, expired token, or parameter mismatch fails with the same "invalid or expired confirmation token" error, so a caller can't distinguish which of those it was. If the matched row set has changed since the preview, the call is rejected outright.
 
 ### Safety handshake
 
@@ -93,7 +94,9 @@ There is no path to deletion without a prior, matching preview:
 1. Call `preview_purge` to see what would be deleted and get back a `confirmation_token`.
 2. Call `execute_purge` with that token and the identical parameters, before it expires (5 minutes).
 
-Tokens are single-use: a successful `execute_purge` consumes the token, so it cannot be replayed. Tokens are also bound to the exact parameter tuple that produced them, so changing any argument invalidates the token even if it hasn't expired. If `execute_purge` fails for a reason that isn't the caller's fault, such as a row-cap breach below, the token is reinstated so a retry with the same token can still succeed.
+Tokens are single-use: a successful `execute_purge` consumes the token, so it cannot be replayed. Tokens are also bound to the exact parameter tuple that produced them, so changing any argument invalidates the token even if it hasn't expired. If `execute_purge` fails for a reason that isn't the caller's fault, such as a row-cap breach or a row-set change below, the token is reinstated so a retry with the same token can still succeed.
+
+A token binds the exact set of rows the preview matched, not just the parameters. `execute_purge` deletes only those rows, by primary key, so a row that starts matching the retention filter after the preview is never deleted. Before deleting, it re-runs the filter and compares a fingerprint of the matched rows against the preview's; if the row set has changed, the call is rejected with a distinct error naming both row counts, and you need a fresh `preview_purge`. The fingerprint covers primary keys only by default, so a row that is modified but still matches is still deleted. Set `DB_PURGE_MCP_FINGERPRINT_FIELDS` to include specific column values in it and reject in-place modifications too. See [DESIGN.md](DESIGN.md) for the full rationale, including the cascade limitation.
 
 ### Settings
 
@@ -101,7 +104,10 @@ Tokens are single-use: a successful `execute_purge` consumes the token, so it ca
   List of models that may be purged via MCP, in `"app_label.ModelName"` format (e.g. `["tests.SampleRecord"]`). Matched case-insensitively, so `"tests.samplerecord"` also works. Defaults to an empty list, meaning nothing is purgeable until you configure it. Enforced on both `preview_purge` and `execute_purge`.
 
 - **`DB_PURGE_MCP_MAX_ROWS`**
-  Maximum number of matching rows an `execute_purge` call may delete, re-checked at execute time even if the preview was under the cap. Defaults to `10000`. This bounds the rows matched by `time_column`, not cascade fan-out: `ON DELETE CASCADE` relations can remove additional related rows beyond this cap.
+  Maximum number of matching rows an `execute_purge` call may delete, re-checked at execute time even if the preview was under the cap. Defaults to `10000`. This bounds the rows matched by `time_column`, not cascade fan-out: `ON DELETE CASCADE` relations can remove additional related rows beyond this cap. It also bounds the size of the row-set fingerprint a preview stores.
+
+- **`DB_PURGE_MCP_FINGERPRINT_FIELDS`**
+  Optional, per model, opt-in. Maps a model label to the extra columns to include in that model's row-set fingerprint, e.g. `{"tests.SampleRecord": ["label"]}`. Model labels are matched case-insensitively, like `DB_PURGE_MCP_ALLOWED_MODELS`. Defaults to an empty dict, meaning fingerprints cover primary keys only, so rows modified in place between preview and execute are still deleted as long as they still match the filter. Name columns here to have `execute_purge` reject those modifications as well. There is no assumption that a model has an `updated_at` or version column: configure whichever columns matter to you.
 
 ### Running the server
 
