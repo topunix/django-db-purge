@@ -2,12 +2,12 @@
 
 ## Project
 
-django-db-purge is an open-source Django management command that deletes
-expired database records based on configurable retention policies. This
-work reshapes it into an MCP server as a portfolio artifact targeting
-agentic AI / MCP-focused Python roles. Code quality, commit hygiene, and
-safety design are part of the deliverable, since employers will read this
-repo.
+django-db-purge is an open-source Django package for deleting expired
+database records based on configurable retention policies. This work
+exposes the purge logic as an MCP server so AI agents can invoke it
+under explicit safety constraints. Because the operations are
+destructive, code quality, commit hygiene, and safety design are part
+of the deliverable rather than afterthoughts.
 
 ## Goal
 
@@ -73,7 +73,7 @@ operations without a human-verifiable preview step.
 - Tests for the token lifecycle (valid, expired, parameter drift),
   the allowlist, and the row cap. Use Django TestCase with a toy model.
 - Work on a feature branch. Small, well-messaged commits. The history
-  is part of the portfolio signal.
+  should explain why each change was made, not just what changed.
 - Plain, readable code over cleverness. A reviewer should grasp the
   safety model from the tool docstrings alone.
 
