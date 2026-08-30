@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from django.core.management import CommandError, call_command
 from django.db import connection
+from django.db.models import QuerySet
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -290,13 +291,43 @@ class TestRowSetFingerprinting(TestCase):
 
         self.assertTrue(token_is_valid(token, *self.params))
 
-    def test_backend_without_select_for_update_support_does_not_error(self):
+    def test_execute_succeeds_on_backend_without_select_for_update_support(self):
+        # Proves execute still works when the backend can't lock rows
+        # (true of SQLite here); it does NOT exercise the gate itself,
+        # since has_select_for_update is False so select_for_update()
+        # is never called. See test_select_for_update_applied_when_
+        # backend_supports_it for that.
         self.assertFalse(connection.features.has_select_for_update)
 
         preview = preview_purge_candidates(*self.params)
 
         result = execute_purge_candidates(*self.params, preview["confirmation_token"])
 
+        self.assertEqual(result["deleted_count"], 1)
+
+    def test_select_for_update_applied_when_backend_supports_it(self):
+        # SQLite itself can't run SELECT ... FOR UPDATE, so
+        # select_for_update() is mocked at the queryset level (as a
+        # no-op passthrough) rather than actually exercised against
+        # the database; only the has_select_for_update gate and the
+        # call are under test here.
+        preview = preview_purge_candidates(*self.params)
+        token = preview["confirmation_token"]
+
+        def passthrough_select_for_update(self, *args, **kwargs):
+            return self
+
+        with patch.object(
+            connection.features, "has_select_for_update", True
+        ), patch.object(
+            QuerySet,
+            "select_for_update",
+            autospec=True,
+            side_effect=passthrough_select_for_update,
+        ) as mock_select_for_update:
+            result = execute_purge_candidates(*self.params, token)
+
+        mock_select_for_update.assert_called_once()
         self.assertEqual(result["deleted_count"], 1)
 
 
