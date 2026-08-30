@@ -11,6 +11,7 @@ django-db-purge deletes expired database records based on configurable retention
 - **Customizable**: Adapt the command to suit your project's specific requirements and database structure.
 - **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
 - **Agent-safe MCP tools**: Optionally let an AI agent purge records through a preview, token, execute handshake that blocks deletion without a matching prior preview.
+- **Row-set bound deletion**: A preview binds the exact rows it matched. Execution deletes only those rows, by primary key, and rejects the call outright if the row set drifted in between, so a concurrent write can never widen a purge.
 
 ## Scheduled purging (cron)
 
