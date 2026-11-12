@@ -17,13 +17,24 @@ Shipped items are deleted in the PR that ships them.
 
 ## Sequenced queue
 
-Sequencing: the policy surface comes first, then logging, then the harness, then the
+Sequencing: CI on pull requests comes first, so every later branch is checked before it
+merges. The policy surface comes next, then logging, then the harness, then the
 release. The harness attacks the final 2.0 interface once instead of being rewritten
-after a signature change, and logging lands before it so attack cases can assert on
-what the server recorded. Attack registry design happens in chat while the policy items
-are implemented.
+after a signature change, and logging lands before it so attack cases can assert on what
+the server recorded. Attack registry design happens in chat while the policy items are
+implemented.
 
-1. **policy-registry**: replace the date-only MCP interface with operator-defined named
+1. **ci-on-pr**: run the test suite and checks on every pull request and on pushes to
+   `master`. Today tests and the wheel smoke test run only inside `publish.yml`, at
+   release time, so a broken branch is not caught until a release is attempted.
+   Decided: a separate workflow file. `publish.yml` keeps its own test and smoke steps
+   as the release gate.
+   Decided: the workflow runs `runtests.py`, mypy, ruff, and the wheel smoke test.
+   Resolve before starting (owner decision):
+   - Python and Django version matrix.
+   Verify: a workflow on `master` triggers on `pull_request` and runs `runtests.py`.
+
+2. **policy-registry**: replace the date-only MCP interface with operator-defined named
    policies. The agent selects a policy by name and supplies only bounded params. It
    never authors a filter.
    Decided: setting name is `DB_PURGE_MCP_POLICIES`. Policy keys are `select`,
@@ -44,7 +55,7 @@ are implemented.
    Verify: `DB_PURGE_MCP_POLICIES` is read by the MCP server on `master` and a
    `list_policies` tool exists.
 
-2. **retention-holds**: a hold predicate that every policy respects.
+3. **retention-holds**: a hold predicate that every policy respects.
    Decided: the hold is ANDed into every policy unconditionally, at both preview and
    execute, and a policy definition cannot override it.
    Decided: if a hold lands between preview and execute, the row set shrinks and the
@@ -57,7 +68,7 @@ are implemented.
    Verify: a test on `master` asserts a held row survives an execute whose preview
    matched it.
 
-3. **cascade-preview**: preview responses report per-related-model cascade counts, so
+4. **cascade-preview**: preview responses report per-related-model cascade counts, so
    the agent and operator see what a delete will take with it.
    Depends on: policy-registry.
    Resolve before starting (owner decision):
@@ -66,7 +77,7 @@ are implemented.
    Verify: a preview response on `master` includes cascade counts keyed by related
    model.
 
-4. **structured-logging**: one stdlib `logging` record per tool call, emitted where a
+5. **structured-logging**: one stdlib `logging` record per tool call, emitted where a
    token is issued, consumed, or rejected.
    Decided: fields are policy name, params, row count, outcome, `client_name`, and
    `client_version`. MCP stdio gives client identity from the `initialize` handshake,
@@ -78,7 +89,7 @@ are implemented.
    Verify: a test on `master` asserts a rejected execute emits a log record with an
    outcome field.
 
-5. **adversarial-harness**: a declarative attack registry and runner that red-teams the
+6. **adversarial-harness**: a declarative attack registry and runner that red-teams the
    MCP surface, with a published results table.
    Decided: categories are token lifecycle, parameter binding, row-set fingerprinting,
    allowlist and scope escape, row cap enforcement, and protocol/injection. The
@@ -94,13 +105,13 @@ are implemented.
    Depends on: policy-registry, retention-holds, cascade-preview, structured-logging.
    Verify: `evals/README.md` on `master` contains a threat model and a results table.
 
-6. **release-2-0**: version bump to 2.0.0, migration note showing the old `days` call
+7. **release-2-0**: version bump to 2.0.0, migration note showing the old `days` call
    expressed as a policy, README structural reorganization, PyPI publish through the
    existing `publish.yml` release workflow.
    Depends on: every item above.
    Verify: PyPI `info.version` is 2.0.0 and the README has a migration section.
 
-7. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
+8. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
    Verify: an `[otel]` extra exists in `setup.py` on `master`.
 
 ## Unscheduled
