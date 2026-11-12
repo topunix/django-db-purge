@@ -35,8 +35,9 @@ Out:
 - List every suppression in the pull request body.
 
 ## Rules for fixes
-- No logic changes. The existing test suite must pass with no test edits other than
-  formatting and import order.
+- No logic changes. The existing test suite must pass. Lint-driven edits to tests are
+  allowed (formatting, import order, merged `with` statements, wrapped lines) as long
+  as no assertion changes.
 - `raise` inside `except` gains `from exc` or `from None`, chosen per case. Say which
   and why for each.
 - If satisfying mypy requires restructuring the optional fastmcp import fallback
