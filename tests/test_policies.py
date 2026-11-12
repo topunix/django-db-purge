@@ -1,9 +1,24 @@
+import hashlib
+import json
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from django.db.models import Q
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
-from dbpurge.policies import load_policies
+from dbpurge.policies import (
+    PurgePolicyError,
+    build_queryset,
+    cutoff_bound,
+    get_policy,
+    hash_params,
+    load_policies,
+    validate_request,
+)
+from tests.models import PolicyNote, PolicyRecord
 
 AGE = {
     "name": "older_than_seconds",
@@ -321,3 +336,365 @@ class TestParamConfig(PolicyConfigTestCase):
             {"p": policy(params=[{**CHOICE, "field": "level", "choices": [1, 2]}])}
         )
         self.assertInvalid(policy(params=[{**CHOICE, "field": "created_at"}]))
+
+
+NOW = datetime(2024, 6, 10, 12, 0, tzinfo=timezone.utc)
+
+
+class RequestTestCase(SimpleTestCase):
+    def policy_with(self, *params, **overrides):
+        raw = policy(params=list(params), **overrides)
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": raw}):
+            return get_policy("p")
+
+    def assertRejected(self, loaded, params):
+        with self.assertRaises(PurgePolicyError) as ctx:
+            validate_request(loaded, params)
+        return str(ctx.exception)
+
+
+class TestGetPolicy(SimpleTestCase):
+    def test_unknown_policy_rejected_without_echoing_the_name(self):
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": policy()}):
+            for name in ("nope", "evil\nINJECTED line", None, 3, ["p"]):
+                with (
+                    self.subTest(name=name),
+                    self.assertRaises(PurgePolicyError) as ctx,
+                ):
+                    get_policy(name)
+                self.assertNotIn("INJECTED", str(ctx.exception))
+                self.assertNotIn("nope", str(ctx.exception))
+
+    def test_no_policies_means_every_name_is_rejected(self):
+        with (
+            override_settings(DB_PURGE_MCP_POLICIES={}),
+            self.assertRaises(PurgePolicyError),
+        ):
+            get_policy("p")
+
+    def test_invalid_config_gives_an_opaque_error_and_a_server_log(self):
+        bad = {"p": policy(action="archive")}
+        with (
+            override_settings(DB_PURGE_MCP_POLICIES=bad),
+            self.assertLogs("dbpurge.policies", "ERROR") as logs,
+            self.assertRaises(PurgePolicyError) as ctx,
+        ):
+            get_policy("p")
+        self.assertNotIn("action", str(ctx.exception))
+        self.assertIn("action must be", "".join(logs.output))
+
+    def test_config_is_reloaded_on_every_call(self):
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": policy()}):
+            get_policy("p")
+        with (
+            override_settings(DB_PURGE_MCP_POLICIES={}),
+            self.assertRaises(PurgePolicyError),
+        ):
+            get_policy("p")
+
+    def test_allowlist_is_rechecked_on_every_call(self):
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": policy()}):
+            get_policy("p")
+            with (
+                override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]),
+                self.assertRaises(PurgePolicyError),
+            ):
+                get_policy("p")
+
+
+class TestValidateRequest(RequestTestCase):
+    def test_none_and_empty_params_are_the_same_for_a_param_less_policy(self):
+        loaded = self.policy_with()
+        self.assertEqual(validate_request(loaded, None), {})
+        self.assertEqual(validate_request(loaded, {}), {})
+
+    def test_keys_must_equal_the_declared_names(self):
+        loaded = self.policy_with(AGE, NUMBER)
+        both = {"older_than_seconds": 100, "min_score": 5}
+        self.assertEqual(validate_request(loaded, both), both)
+        for params in (
+            None,
+            {},
+            {"older_than_seconds": 100},
+            {**both, "extra": 1},
+            {"older_than_seconds": 100, "other": 5},
+        ):
+            with self.subTest(params=params):
+                self.assertRejected(loaded, params)
+
+    def test_extra_keys_are_not_echoed(self):
+        loaded = self.policy_with()
+        message = self.assertRejected(loaded, {"evil\nINJECTED": 1})
+        self.assertNotIn("INJECTED", message)
+
+    def test_params_must_be_an_object(self):
+        loaded = self.policy_with(AGE)
+        for params in ([1], "x", 5):
+            with self.subTest(params=params):
+                self.assertRejected(loaded, params)
+
+    def test_age_seconds_accepts_only_in_bounds_ints(self):
+        loaded = self.policy_with(AGE)
+        for value in (60, 3600, 1000):
+            self.assertEqual(
+                validate_request(loaded, {"older_than_seconds": value}),
+                {"older_than_seconds": value},
+            )
+        for value in (59, 3601, -1, 0, 100.0, 100.5, True, "100", None, [100]):
+            with self.subTest(value=value):
+                self.assertRejected(loaded, {"older_than_seconds": value})
+
+    def test_number_accepts_in_bounds_ints_and_floats(self):
+        loaded = self.policy_with(NUMBER)
+        for value in (0, 100, 0.5, 99.99, 5):
+            self.assertEqual(
+                validate_request(loaded, {"min_score": value}), {"min_score": value}
+            )
+        for value in (-0.1, 100.1, True, False, "5", None, {}):
+            with self.subTest(value=value):
+                self.assertRejected(loaded, {"min_score": value})
+
+    def test_number_rejects_nan_and_infinity(self):
+        loaded = self.policy_with(NUMBER)
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertRejected(loaded, {"min_score": value})
+
+    def test_choice_requires_an_exact_declared_value(self):
+        loaded = self.policy_with(CHOICE)
+        self.assertEqual(
+            validate_request(loaded, {"status": "failed"}), {"status": "failed"}
+        )
+        for value in ("other", "FAILED", " failed", 1, True, None, ["failed"]):
+            with self.subTest(value=value):
+                self.assertRejected(loaded, {"status": value})
+
+    def test_choice_is_type_strict(self):
+        int_choice = {**CHOICE, "field": "level", "choices": [1, 2]}
+        loaded = self.policy_with(int_choice)
+        self.assertEqual(validate_request(loaded, {"status": 1}), {"status": 1})
+        for value in (True, 1.0, "1", 3):
+            with self.subTest(value=value):
+                self.assertRejected(loaded, {"status": value})
+
+    def test_error_messages_never_echo_supplied_strings(self):
+        loaded = self.policy_with(CHOICE)
+        message = self.assertRejected(loaded, {"status": "evil\nINJECTED"})
+        self.assertNotIn("INJECTED", message)
+
+
+class TestWindowValidation(RequestTestCase):
+    older = {**AGE, "name": "older_than", "min": 1, "max": 1000}
+    newer = {**AGE, "name": "newer_than", "min": 1, "max": 1000, "op": "gte"}
+
+    def test_age_window_valid_when_newer_offset_is_larger(self):
+        loaded = self.policy_with(self.older, self.newer)
+        params = {"older_than": 100, "newer_than": 500}
+        self.assertEqual(validate_request(loaded, params), params)
+
+    def test_age_window_inverted_rejected(self):
+        loaded = self.policy_with(self.older, self.newer)
+        self.assertRejected(loaded, {"older_than": 500, "newer_than": 100})
+
+    def test_age_window_with_equal_bounds_is_a_valid_point(self):
+        loaded = self.policy_with(self.older, self.newer)
+        params = {"older_than": 100, "newer_than": 100}
+        self.assertEqual(validate_request(loaded, params), params)
+
+    def number_window(self, low_op, up_op):
+        low = {**NUMBER, "name": "low", "op": low_op}
+        high = {**NUMBER, "name": "high", "op": up_op}
+        return self.policy_with(low, high)
+
+    def test_number_window_valid_and_inverted(self):
+        loaded = self.number_window("gte", "lte")
+        self.assertEqual(
+            validate_request(loaded, {"low": 1, "high": 2}), {"low": 1, "high": 2}
+        )
+        self.assertRejected(loaded, {"low": 3, "high": 2})
+
+    def test_number_window_equal_bounds_only_valid_when_both_inclusive(self):
+        equal = {"low": 5, "high": 5}
+        self.assertEqual(
+            validate_request(self.number_window("gte", "lte"), equal), equal
+        )
+        for low_op, up_op in (("gt", "lte"), ("gte", "lt"), ("gt", "lt")):
+            with self.subTest(ops=(low_op, up_op)):
+                self.assertRejected(self.number_window(low_op, up_op), equal)
+
+
+class TestHashParams(SimpleTestCase):
+    def test_matches_the_documented_canonical_form(self):
+        raw = json.dumps(
+            {"policy": "p", "params": {"a": 1, "b": "x"}},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected = hashlib.sha256(raw.encode()).hexdigest()
+        self.assertEqual(hash_params("p", {"a": 1, "b": "x"}), expected)
+
+    def test_stable_across_param_key_order(self):
+        self.assertEqual(
+            hash_params("p", {"a": 1, "b": 2}), hash_params("p", {"b": 2, "a": 1})
+        )
+
+    def test_differs_by_policy_and_by_params(self):
+        base = hash_params("p", {"a": 1})
+        self.assertNotEqual(base, hash_params("q", {"a": 1}))
+        self.assertNotEqual(base, hash_params("p", {"a": 2}))
+        self.assertNotEqual(base, hash_params("p", {"b": 1}))
+
+    def test_equal_int_and_float_hash_differently(self):
+        self.assertNotEqual(hash_params("p", {"a": 5}), hash_params("p", {"a": 5.0}))
+
+    def test_no_param_boundary_ambiguity(self):
+        self.assertNotEqual(
+            hash_params("p", {"a": "1|2"}), hash_params("p", {"a": "1", "b": "2"})
+        )
+
+
+class TestCutoffBound(SimpleTestCase):
+    def test_datetime_field_keeps_the_aware_datetime(self):
+        field = PolicyRecord._meta.get_field("created_at")
+        self.assertEqual(cutoff_bound(field, NOW), NOW)
+
+    def test_date_field_gets_a_date_not_a_datetime(self):
+        field = PolicyRecord._meta.get_field("due_on")
+        bound = cutoff_bound(field, NOW)
+        self.assertIs(type(bound), date)
+
+    @override_settings(TIME_ZONE="UTC")
+    def test_date_field_uses_the_cutoff_calendar_date(self):
+        field = PolicyRecord._meta.get_field("due_on")
+        late = datetime(2024, 6, 8, 23, 30, tzinfo=timezone.utc)
+        self.assertEqual(cutoff_bound(field, late), date(2024, 6, 8))
+
+
+def make_record(**kwargs):
+    defaults = {
+        "created_at": NOW - timedelta(days=1),
+        "due_on": date(2024, 6, 9),
+    }
+    return PolicyRecord.objects.create(**{**defaults, **kwargs})
+
+
+class BuildQuerysetTestCase(TestCase):
+    def matched(self, *params, params_given=None, now=NOW, **overrides):
+        overrides.setdefault("select", Q())
+        raw = policy(params=list(params), **overrides)
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": raw}):
+            loaded = get_policy("p")
+        validated = validate_request(loaded, params_given)
+        queryset = build_queryset(loaded, validated, now)
+        return sorted(queryset.values_list("pk", flat=True))
+
+
+class TestBuildQueryset(BuildQuerysetTestCase):
+    def test_select_and_exclude_apply(self):
+        keep = make_record(status="failed")
+        make_record(status="new")
+        make_record(status="held")
+        pks = self.matched(
+            select=Q(status__in=["failed", "held"]), exclude=Q(status="held")
+        )
+        self.assertEqual(pks, [keep.pk])
+
+    def test_age_seconds_lte_and_gte(self):
+        old = make_record(created_at=NOW - timedelta(days=10))
+        fresh = make_record(created_at=NOW - timedelta(minutes=1))
+        older = {**AGE, "min": 1, "max": 10**8}
+        newer = {**older, "op": "gte"}
+        self.assertEqual(
+            self.matched(older, params_given={"older_than_seconds": 3600}),
+            [old.pk],
+        )
+        self.assertEqual(
+            self.matched(newer, params_given={"older_than_seconds": 3600}),
+            [fresh.pk],
+        )
+
+    def test_age_boundary_is_inclusive(self):
+        edge = make_record(created_at=NOW - timedelta(seconds=3600))
+        older = {**AGE, "min": 1, "max": 10**8}
+        pks = self.matched(older, params_given={"older_than_seconds": 3600})
+        self.assertEqual(pks, [edge.pk])
+
+    def test_date_field_age_compares_dates(self):
+        make_record(due_on=date(2024, 6, 9))
+        edge = make_record(due_on=date(2024, 6, 8))
+        older_on_due = {**AGE, "field": "due_on", "min": 1, "max": 10**8}
+        with override_settings(TIME_ZONE="UTC"):
+            pks = self.matched(
+                older_on_due, params_given={"older_than_seconds": 2 * 86400}
+            )
+        self.assertEqual(pks, [edge.pk])
+
+    def test_number_ops(self):
+        low = make_record(score=1.0)
+        mid = make_record(score=5.0)
+        high = make_record(score=9.0)
+        cases = {
+            "lt": [low.pk],
+            "lte": [low.pk, mid.pk],
+            "gt": [high.pk],
+            "gte": [mid.pk, high.pk],
+        }
+        for op, expected in cases.items():
+            number = {**NUMBER, "op": op, "min": 0, "max": 10}
+            with self.subTest(op=op):
+                pks = self.matched(number, params_given={"min_score": 5})
+                self.assertEqual(pks, sorted(expected))
+
+    def test_number_compares_decimal_fields_exactly(self):
+        row = make_record(amount=Decimal("0.10"))
+        make_record(amount=Decimal("0.11"))
+        number = {**NUMBER, "field": "amount", "op": "lte", "min": 0, "max": 1}
+        self.assertEqual(
+            self.matched(number, params_given={"min_score": 0.1}), [row.pk]
+        )
+
+    def test_choice_filters_by_exact_match(self):
+        failed = make_record(status="failed")
+        make_record(status="cancelled")
+        pks = self.matched(CHOICE, params_given={"status": "failed"})
+        self.assertEqual(pks, [failed.pk])
+
+    def test_window_selects_only_rows_inside_it(self):
+        make_record(score=1.0)
+        inside = make_record(score=5.0)
+        make_record(score=9.0)
+        low = {**NUMBER, "name": "low", "op": "gte"}
+        high = {**NUMBER, "name": "high", "op": "lt"}
+        pks = self.matched(low, high, params_given={"low": 3, "high": 7})
+        self.assertEqual(pks, [inside.pk])
+
+
+class TestToManyJoins(BuildQuerysetTestCase):
+    def setUp(self):
+        self.record = make_record()
+        for _ in range(3):
+            PolicyNote.objects.create(record=self.record, body="x")
+        self.other = make_record()
+        PolicyNote.objects.create(record=self.other, body="y")
+
+    def queryset(self, **overrides):
+        raw = policy(**overrides)
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": raw}):
+            return build_queryset(get_policy("p"), {}, NOW)
+
+    def test_select_joining_a_to_many_returns_each_row_once(self):
+        queryset = self.queryset(select=Q(notes__body="x"))
+        self.assertEqual(queryset.count(), 1)
+        self.assertEqual(list(queryset), [self.record])
+
+    def test_exclude_joining_a_to_many_returns_each_row_once(self):
+        queryset = self.queryset(select=Q(pk__gt=0), exclude=Q(notes__body="x"))
+        self.assertEqual(list(queryset), [self.other])
+
+    def test_does_not_use_distinct_and_works_with_select_for_update(self):
+        queryset = self.queryset(select=Q(notes__body__in=["x", "y"]))
+        self.assertNotIn("DISTINCT", str(queryset.query))
+        with transaction.atomic():
+            locked = queryset.select_for_update()
+            self.assertEqual(locked.count(), 2)
+            self.assertEqual(len(list(locked)), 2)

@@ -4,11 +4,15 @@ Shared guards for the MCP purge server.
 This module has no fastmcp import, so it works without the [mcp] extra.
 """
 
+import hashlib
+import json
+import logging
 import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 from django.apps import apps
@@ -17,6 +21,7 @@ from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.db.models import (
     CharField,
     DateField,
+    DateTimeField,
     DecimalField,
     FloatField,
     IntegerField,
@@ -26,6 +31,8 @@ from django.db.models import (
     TextField,
 )
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ROWS = 10000
 
@@ -376,3 +383,190 @@ def load_policies() -> dict[str, Policy]:
     if not isinstance(raw, Mapping):
         raise ImproperlyConfigured("DB_PURGE_MCP_POLICIES must be a dict")
     return {name: _load_policy(name, value) for name, value in raw.items()}
+
+
+ParamValue = int | float | str
+
+_POLICIES_UNAVAILABLE = "Purge policies are not available"
+
+
+def get_policy(name: object) -> Policy:
+    """
+    Load policies afresh and return the one called name.
+
+    Loading on every call means the allowlist and the config are
+    re-checked each time, with no cache to go stale. If the config is
+    invalid the client gets one opaque message and the detail goes to
+    the server log only. An unknown name is rejected without echoing
+    it, since it is agent-supplied text.
+    """
+    try:
+        policies = load_policies()
+    except ImproperlyConfigured as exc:
+        logger.error("DB_PURGE_MCP_POLICIES failed validation: %s", exc)
+        raise PurgePolicyError(_POLICIES_UNAVAILABLE) from None
+    policy = policies.get(name) if isinstance(name, str) else None
+    if policy is None:
+        raise PurgePolicyError("Unknown purge policy. Call list_policies first.")
+    return policy
+
+
+def validate_request(
+    policy: Policy, params: Mapping[str, object] | None
+) -> dict[str, ParamValue]:
+    """
+    Validate agent-supplied params against the policy, before any query.
+
+    Shared guard for preview_purge and execute_purge. None is the same
+    as {}. The keys must equal the declared param names exactly: there
+    are no defaults, and extra keys are rejected. Values are checked as
+    received, by exact type: a bool is never a number, NaN and Infinity
+    are never accepted, and a choice must equal a declared entry. A
+    same-field pair must describe a non-empty window. Returns the
+    validated values, which are what the confirmation token binds to.
+    Error messages name only declared params, never supplied text.
+    """
+    supplied: Mapping[str, object] = {} if params is None else params
+    if not isinstance(supplied, Mapping):
+        raise PurgePolicyError("params must be an object")
+    declared = [param.name for param in policy.params]
+    if set(supplied) != set(declared):
+        raise PurgePolicyError(
+            f"params must be exactly: {', '.join(declared) or '(none)'}"
+        )
+    validated = {
+        param.name: _validate_value(param, supplied[param.name])
+        for param in policy.params
+    }
+    _check_window(policy.params, validated)
+    return validated
+
+
+def _validate_value(param: Param, value: object) -> ParamValue:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise PurgePolicyError(f"param {param.name!r} has an invalid value")
+    if param.type == "choice":
+        choices = param.choices or ()
+        if not choices or type(value) is not type(choices[0]) or value not in choices:
+            raise PurgePolicyError(f"param {param.name!r} is not an allowed choice")
+        return value
+    if isinstance(value, str):
+        raise PurgePolicyError(f"param {param.name!r} must be a number")
+    if param.type == "age_seconds" and not isinstance(value, int):
+        raise PurgePolicyError(f"param {param.name!r} must be an integer")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise PurgePolicyError(f"param {param.name!r} must be finite")
+    low, high = param.minimum, param.maximum
+    if low is None or high is None or not low <= value <= high:
+        raise PurgePolicyError(
+            f"param {param.name!r} is out of bounds ({low} to {high})"
+        )
+    return value
+
+
+def _as_number(value: ParamValue) -> int | float:
+    if isinstance(value, str):
+        raise PurgePolicyError("a range param must be a number")
+    return value
+
+
+def _check_window(
+    params: tuple[Param, ...], validated: Mapping[str, ParamValue]
+) -> None:
+    """
+    Reject a same-field pair whose window is inverted or empty.
+
+    For age_seconds the upper side (lte, "older than a seconds") and the
+    lower side (gte, "within b seconds") overlap only if b >= a. For
+    number, the window is empty if lower > upper, or if they are equal
+    and either side is strict. Equal bounds are valid only when both
+    ops are inclusive, a single point.
+    """
+    lower: dict[str, Param] = {}
+    upper: dict[str, Param] = {}
+    for param in params:
+        (upper if param.op in _UPPER_OPS else lower)[param.field] = param
+    for field in lower.keys() & upper.keys():
+        low_param, up_param = lower[field], upper[field]
+        low = _as_number(validated[low_param.name])
+        up = _as_number(validated[up_param.name])
+        if low_param.type == "age_seconds":
+            # Offsets are seconds before now, so the lower side is the
+            # larger offset.
+            empty = low < up
+        else:
+            strict = low_param.op == "gt" or up_param.op == "lt"
+            empty = low > up or (low == up and strict)
+        if empty:
+            raise PurgePolicyError(
+                f"params {low_param.name!r} and {up_param.name!r} describe an "
+                "empty window"
+            )
+
+
+def cutoff_bound(field: Any, cutoff: datetime) -> datetime | date:
+    """
+    Return cutoff in the form a lookup on field should compare against.
+
+    A DateTimeField compares against the aware datetime. A DateField
+    compares against the cutoff's calendar date in the current time
+    zone, so the comparison never depends on how a backend coerces a
+    datetime into a date.
+    """
+    if isinstance(field, DateTimeField):
+        return cutoff
+    if timezone.is_aware(cutoff):
+        local_date: date = timezone.localdate(cutoff)
+        return local_date
+    return cutoff.date()
+
+
+def build_queryset(
+    policy: Policy, validated: Mapping[str, ParamValue], now: datetime
+) -> QuerySet[Any]:
+    """
+    Return the policy's matching rows for these validated params.
+
+    Applies select, then exclude, then each param's filter. Preview and
+    execute both call this, so they cannot disagree about which rows
+    match. The conditions run in a subquery and the result selects the
+    model by pk, so a select or exclude that joins a to-many relation
+    still yields each row exactly once without DISTINCT, which keeps the
+    result compatible with select_for_update on backends that forbid
+    FOR UPDATE together with DISTINCT.
+    """
+    inner = _select_queryset(policy.model, policy.select, policy.exclude)
+    for param in policy.params:
+        value = validated[param.name]
+        field = policy.model._meta.get_field(param.field)
+        if param.type == "age_seconds":
+            seconds = _as_number(value)
+            cutoff = now - timedelta(seconds=seconds)
+            inner = inner.filter(
+                **{f"{param.field}__{param.op}": cutoff_bound(field, cutoff)}
+            )
+        elif param.type == "number":
+            bound: int | float | Decimal = _as_number(value)
+            if isinstance(field, DecimalField):
+                bound = Decimal(str(bound))
+            inner = inner.filter(**{f"{param.field}__{param.op}": bound})
+        else:
+            inner = inner.filter(**{param.field: value})
+    return policy.model._default_manager.filter(pk__in=inner.values("pk"))
+
+
+def hash_params(policy_name: str, validated: Mapping[str, ParamValue]) -> str:
+    """
+    Return the token binding hash for a policy name and validated params.
+
+    Canonical JSON with sorted keys, so key order never changes the
+    hash. Values are hashed as received: 5 and 5.0 give different
+    hashes, which can only make a token fail to match, never match
+    wrongly.
+    """
+    raw = json.dumps(
+        {"policy": policy_name, "params": validated},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
