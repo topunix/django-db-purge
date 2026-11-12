@@ -91,3 +91,12 @@ operations without a human-verifiable preview step.
 - When showing proposed edits in discussion, show only new or changed
   functions with comments marking unchanged code.
 - No co-author or attribution trailers in commit messages.
+
+## Roadmap
+
+- The roadmap lives at docs/roadmap.md.
+- Check an item's Verify marker against master before acting on it.
+- Only the maintainer reorders or adds roadmap items. Propose changes,
+  do not apply them.
+- Task specs live in docs/tasks/<slug>.md and are deleted after the work
+  lands.
