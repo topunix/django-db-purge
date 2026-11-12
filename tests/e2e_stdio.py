@@ -7,6 +7,7 @@ spawns `python -m django purge_mcp_server` as a subprocess and speaks
 the JSON-RPC wire protocol to it, the same way an MCP client would.
 Run: python tests/e2e_stdio.py
 """
+
 import asyncio
 import json
 import os
@@ -36,7 +37,9 @@ async def recv(proc: asyncio.subprocess.Process) -> dict:
     return json.loads(line)
 
 
-async def call_tool(proc: asyncio.subprocess.Process, request_id: int, name: str, arguments: dict) -> dict:
+async def call_tool(
+    proc: asyncio.subprocess.Process, request_id: int, name: str, arguments: dict
+) -> dict:
     await send(
         proc,
         {
@@ -108,7 +111,9 @@ async def run_checks(db_path: str) -> None:
         sample_rows = candidates["sample_rows"]
         if len(sample_rows) != 1 or set(sample_rows[0]) != {"pk", "created_at"}:
             fail(f"unexpected sample_rows shape: {sample_rows}")
-        if not candidates.get("confirmation_token") or not candidates.get("token_expires_at"):
+        if not candidates.get("confirmation_token") or not candidates.get(
+            "token_expires_at"
+        ):
             fail(f"missing token fields: {candidates}")
 
         bad_model = await call_tool(
@@ -155,7 +160,9 @@ async def run_checks(db_path: str) -> None:
 
         reused = await call_tool(proc, 6, "execute_purge", execute_args)
         if not reused.get("isError"):
-            fail(f"expected a reused (already-consumed) token to be rejected, got {reused}")
+            fail(
+                f"expected a reused (already-consumed) token to be rejected, got {reused}"
+            )
 
         after_delete = await call_tool(
             proc,
@@ -187,7 +194,9 @@ def seed_database() -> None:
 
     from tests.models import SampleRecord
 
-    SampleRecord.objects.create(created_at=timezone.now() - timedelta(days=10), label="stale")
+    SampleRecord.objects.create(
+        created_at=timezone.now() - timedelta(days=10), label="stale"
+    )
     SampleRecord.objects.create(created_at=timezone.now(), label="fresh")
 
     # Release the sqlite connection before the subprocess opens the

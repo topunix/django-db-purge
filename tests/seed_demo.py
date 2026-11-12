@@ -5,6 +5,7 @@ Seed demo.sqlite3 for manually trying the MCP server against real data.
 Run: python tests/seed_demo.py
 Then: DJANGO_SETTINGS_MODULE=tests.demo_settings python manage.py purge_mcp_server
 """
+
 import os
 import sys
 from datetime import timedelta

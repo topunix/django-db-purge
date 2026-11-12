@@ -28,6 +28,7 @@ except ImportError:
     class ToolError(Exception):
         """Stand-in for fastmcp.exceptions.ToolError when fastmcp is absent."""
 
+
 logger = logging.getLogger(__name__)
 
 MISSING_FASTMCP_ERROR = (
@@ -417,7 +418,9 @@ def preview_purge(
     to actually delete rows. This tool performs no deletion.
     """
     try:
-        return preview_purge_candidates(app_name, model_name, time_column, retention_seconds)
+        return preview_purge_candidates(
+            app_name, model_name, time_column, retention_seconds
+        )
     except PurgePolicyError as exc:
         raise ToolError(str(exc)) from exc
 

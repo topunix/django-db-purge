@@ -54,9 +54,15 @@ class TestPreviewPurgeCandidates(TestCase):
         preview = preview_purge_candidates(*self.params)
 
         self.assertEqual(preview["row_count"], 1)
-        self.assertEqual(preview["sample_rows"], [
-            {"pk": self.old_record.pk, "created_at": self.old_record.created_at.isoformat()}
-        ])
+        self.assertEqual(
+            preview["sample_rows"],
+            [
+                {
+                    "pk": self.old_record.pk,
+                    "created_at": self.old_record.created_at.isoformat(),
+                }
+            ],
+        )
         self.assertTrue(token_is_valid(preview["confirmation_token"], *self.params))
 
     def test_caps_sample_rows_at_five(self):
@@ -317,14 +323,15 @@ class TestRowSetFingerprinting(TestCase):
         def passthrough_select_for_update(self, *args, **kwargs):
             return self
 
-        with patch.object(
-            connection.features, "has_select_for_update", True
-        ), patch.object(
-            QuerySet,
-            "select_for_update",
-            autospec=True,
-            side_effect=passthrough_select_for_update,
-        ) as mock_select_for_update:
+        with (
+            patch.object(connection.features, "has_select_for_update", True),
+            patch.object(
+                QuerySet,
+                "select_for_update",
+                autospec=True,
+                side_effect=passthrough_select_for_update,
+            ) as mock_select_for_update,
+        ):
             result = execute_purge_candidates(*self.params, token)
 
         mock_select_for_update.assert_called_once()

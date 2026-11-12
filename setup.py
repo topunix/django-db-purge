@@ -7,33 +7,33 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
 # get README
-with open(os.path.join(BASE_DIR, 'README.md')) as f:
+with open(os.path.join(BASE_DIR, "README.md")) as f:
     long_description = f.read()
 
 setup(
-    name='django-db-purge',
-    version='1.3.0',
-    packages=find_packages(exclude=['tests', 'tests.*']),
-    description='Clean up your Django database effortlessly with customizable record removal based on your retention policy',
+    name="django-db-purge",
+    version="1.3.0",
+    packages=find_packages(exclude=["tests", "tests.*"]),
+    description="Clean up your Django database effortlessly with customizable record removal based on your retention policy",
     long_description_content_type="text/markdown",
-    long_description = long_description,
-    python_requires='>=3.10',
-    install_requires=['Django>=2'],
-    extras_require={'mcp': ['fastmcp>=3.0']},
-    url='https://github.com/topunix/django-db-purge',
-    author='topunix',
-    author_email='833824+topunix@users.noreply.github.com',
-    license='MIT',
+    long_description=long_description,
+    python_requires=">=3.10",
+    install_requires=["Django>=2"],
+    extras_require={"mcp": ["fastmcp>=3.0"]},
+    url="https://github.com/topunix/django-db-purge",
+    author="topunix",
+    author_email="833824+topunix@users.noreply.github.com",
+    license="MIT",
     classifiers=[
-        'Environment :: Web Environment',
-        'Framework :: Django',
-        'Framework :: Django :: 2.0',
-        'Intended Audience :: Developers',
-        'License :: OSI Approved :: MIT License',
-        'Operating System :: OS Independent',
-        'Programming Language :: Python',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Topic :: Internet :: WWW/HTTP',
+        "Environment :: Web Environment",
+        "Framework :: Django",
+        "Framework :: Django :: 2.0",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python",
+        "Programming Language :: Python :: 3.5",
+        "Programming Language :: Python :: 3.6",
+        "Topic :: Internet :: WWW/HTTP",
     ],
 )
