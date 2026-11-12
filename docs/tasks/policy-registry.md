@@ -65,7 +65,7 @@ Config rules, all enforced when policies load. Any violation raises
   effective `max_rows`, and each param's `name`, `type`, and bounds or choices. It
   never returns `select`, `exclude`, or param field names.
 - `preview_purge(policy_name: str, params: dict[str, int | float | str] | None = None)`
-- `execute_purge(policy_name: str, params: dict[str, int | float | str] | None, confirmation_token: str)`
+- `execute_purge(policy_name: str, confirmation_token: str, params: dict[str, int | float | str] | None = None)` (amended, see Rulings)
 - `list_purge_candidates` is removed.
 - Return types are TypedDicts, as today. FastMCP derives the agent-facing schema from
   these signatures and docstrings, so they are part of the contract.
@@ -118,7 +118,7 @@ received:
    and every preview is rejected.
 2. Each config rule above has a test proving the violation raises
    `ImproperlyConfigured`.
-3. A policy with no params previews and executes with `params` omitted or `{}`.
+3. A policy with no params previews and executes with `params` omitted, `None`, or `{}`.
 4. A policy with one `age_seconds`, one `number`, and one `choice` param each preview
    and execute correctly, and each rejects an out-of-bounds or undeclared value
    without touching the database.
@@ -137,6 +137,15 @@ received:
     stdio.
 13. `ruff check .`, `ruff format --check .`, `mypy`, and the full suite pass, locally
     and in CI on the pull request.
+14. NaN and Infinity are rejected for a number param without touching the database.
+15. A test through the real tool layer shows JSON true is rejected for a number param.
+16. A policy whose select joins a to-many relation reports a count equal to the number
+    of distinct rows.
+17. An unknown policy name containing a newline does not appear raw in any error or
+    log output.
+18. No preview response contains a model field name as a key.
+19. A policy whose select names a nonexistent field raises `ImproperlyConfigured` at
+    load.
 
 ## Tests to add
 - `tests/test_policies.py`: one test per config rule, one per param type and bound,
@@ -160,3 +169,68 @@ received:
 ## Roadmap item addressed
 `policy-registry`. Delete it from `docs/roadmap.md` in this PR once
 `DB_PURGE_MCP_POLICIES` is read by the server and `list_policies` exists.
+
+## Rulings
+Owner decisions made after the implementation plan was reviewed. Where a ruling
+conflicts with text above, the ruling wins.
+
+### Conflicts
+- Signature: `execute_purge(policy_name: str, confirmation_token: str, params: ... | None = None)`.
+  `params=None` is normalized to `{}` everywhere, including the hash.
+- Coercion: validation must see values as the client sent them. JSON true must be
+  rejected for a number param, not treated as 1. If the declared signature coerces,
+  change the signature so it does not, and report the change.
+- Preview `sample_rows` key each value by param name, never by field name.
+- `_row_set_snapshot` ordering by pk is accepted. Over-cap executes are refused anyway,
+  so the slice only affects the stored fingerprint.
+- Stale docs: add a one-line "Amended by ADR 4" note under ADR 1, 2, and 3 where they
+  describe the old hash, sample, or ordering. Bodies are not rewritten. The CLAUDE.md
+  Tool surface section and the `validate_policy` mention are updated to match the code.
+- Moving the shared guards into `dbpurge/policies.py` is approved.
+
+### Ambiguities
+1. Tools call `load_policies()` on every call, with no module-level cache. `handle()`
+   also loads once so bad config stops startup. If load fails during a tool call, the
+   client gets an opaque error and the detail is logged server-side.
+2. Windows: equal bounds are valid only when both ops are inclusive. Any strict op with
+   equal bounds is empty and rejected.
+3. Two `choice` params on the same field are rejected at load, with a rule and a test.
+4. `choices` is a non-empty list of str or of int, one type only, no duplicates, no
+   bool, None, or float. str choices need a character field, int choices an integer
+   field. Request values are matched by exact type and value.
+5. `number`: min and max are finite int or float, never bool. Numeric field means the
+   integer field family, FloatField, or DecimalField. For DecimalField, compare using
+   `Decimal(str(value))`. No param of any type may target the primary key or a
+   relational field.
+6. `load_policies()` compiles each policy's query without executing it, so a Q naming a
+   missing field raises `ImproperlyConfigured` at load. If compiling needs a live
+   database connection, stop and report.
+7. Resolved by ruling 1.
+8. The validated values are hashed as received. 5 and 5.0 give different tokens. That
+   fails safe and is recorded in ADR 4.
+9. `list_policies` exposes `op` for `age_seconds` and `number` params. The return
+   structure is typed as precisely as strict mypy allows.
+10. For a DateField param, compare against the cutoff's date, not an aware datetime,
+    with a test. The cron path is untouched.
+
+### Additional requirements
+- Non-finite numbers (NaN, Infinity, -Infinity) are rejected in requests and in config
+  bounds. For `age_seconds`, max must be small enough that now minus max is a
+  representable datetime.
+- Policy names must match `^[a-z][a-z0-9_]{0,63}$`.
+- Agent-supplied strings are never echoed raw into error messages or log lines.
+- The matched queryset returns each row exactly once even when select or exclude joins
+  across a to-many relation, and stays compatible with `select_for_update`.
+
+### ADR 4 accepted limitations to record
+- Aggregate cap bypass by slicing params across calls.
+- Preview as a read oracle on param fields.
+- Tokens are not bound to the policy definition.
+- Settings-time values are frozen at startup.
+- Token store growth from repeated previews.
+
+### Review gates
+Batch A is commits 1 to 4, batch B is commits 5 and 6, batch C is commits 7 to 9.
+Each batch is shown as a full diff and approved before it is committed. Before commit 6,
+a venv with `pip install ".[mcp]"` is used to run `tests/e2e_stdio.py` and a real
+tool-layer coercion test.
