@@ -22,7 +22,7 @@ setup(
     extras_require={'mcp': ['fastmcp>=3.0']},
     url='https://github.com/topunix/django-db-purge',
     author='topunix',
-    author_email='topunixguy@gmail.com',
+    author_email='833824+topunix@users.noreply.github.com',
     license='MIT',
     classifiers=[
         'Environment :: Web Environment',
