@@ -1,10 +1,11 @@
 import logging
 import time
-from django.conf import settings
-from django.core.management.base import BaseCommand
-from django.core.management import CommandError
-from django.apps import apps
 from datetime import timedelta
+
+from django.apps import apps
+from django.conf import settings
+from django.core.management import CommandError
+from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -54,13 +55,16 @@ class Command(BaseCommand):
         # Check if app_name and model_name are valid
         try:
             model = apps.get_model(app_label=app_name, model_name=model_name)
-        except LookupError:
-            raise CommandError(f"Model '{model_name}' in app '{app_name}' not found")
+        except LookupError as exc:
+            raise CommandError(
+                f"Model '{model_name}' in app '{app_name}' not found"
+            ) from exc
 
         # Check if time_based_column_name exists in the model's fields
         if not model._meta.get_field(time_based_column_name):
             raise CommandError(
-                f"Time-based column '{time_based_column_name}' does not exist in model '{model_name}'."
+                f"Time-based column '{time_based_column_name}' does not exist "
+                f"in model '{model_name}'."
             )
 
         # Check if data_retention_num_seconds is a positive integer

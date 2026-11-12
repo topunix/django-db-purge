@@ -161,7 +161,8 @@ async def run_checks(db_path: str) -> None:
         reused = await call_tool(proc, 6, "execute_purge", execute_args)
         if not reused.get("isError"):
             fail(
-                f"expected a reused (already-consumed) token to be rejected, got {reused}"
+                "expected a reused (already-consumed) token to be rejected, "
+                f"got {reused}"
             )
 
         after_delete = await call_tool(

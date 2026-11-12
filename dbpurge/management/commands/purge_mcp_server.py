@@ -145,8 +145,10 @@ def validate_policy(
     """
     try:
         model = apps.get_model(app_label=app_name, model_name=model_name)
-    except LookupError:
-        raise PurgePolicyError(f"Model '{model_name}' in app '{app_name}' not found")
+    except LookupError as exc:
+        raise PurgePolicyError(
+            f"Model '{model_name}' in app '{app_name}' not found"
+        ) from exc
 
     if not _is_allowed_model(model):
         raise PurgePolicyError(
@@ -156,10 +158,10 @@ def validate_policy(
 
     try:
         field = model._meta.get_field(time_column)
-    except FieldDoesNotExist:
+    except FieldDoesNotExist as exc:
         raise PurgePolicyError(
             f"Column '{time_column}' does not exist on model '{model_name}'"
-        )
+        ) from exc
     if not isinstance(field, (DateField, DateTimeField)):
         raise PurgePolicyError(
             f"Column '{time_column}' on model '{model_name}' is not a date or "
@@ -277,11 +279,9 @@ def token_is_valid(
         return False
     if timezone.now() >= record.expires_at:
         return False
-    if record.params_hash != _hash_params(
+    return record.params_hash == _hash_params(
         app_name, model_name, time_column, retention_seconds
-    ):
-        return False
-    return True
+    )
 
 
 def _pop_valid_token(

@@ -4,9 +4,17 @@
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+# Lint scope is Python source. Markdown code samples may be deliberately partial.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Imports must follow django.setup(), so they cannot sit at the top of the file.
+"tests/seed_demo.py" = ["E402"]
+# Extends tests.settings by star import, so names come from a star import.
+"tests/demo_settings.py" = ["F403", "F405"]
 
 [tool.mypy]
 python_version = "3.10"

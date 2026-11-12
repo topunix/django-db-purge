@@ -1,9 +1,11 @@
 import unittest
-from unittest.mock import MagicMock, patch
 from datetime import timedelta
+from unittest.mock import MagicMock, patch
+
 from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
+
 from dbpurge.management.commands.db_purge import Command
 from tests.models import SampleRecord
 
