@@ -76,6 +76,12 @@ operations without a human-verifiable preview step.
   should explain why each change was made, not just what changed.
 - Plain, readable code over cleverness. A reviewer should grasp the
   safety model from the tool docstrings alone.
+- Lint and type checks run in CI and must pass locally first:
+  ruff check .
+  ruff format --check .
+  mypy
+- Every per-file ignore, noqa, and type: ignore names a specific code
+  and carries a one-line reason. No blanket ignores.
 
 ## Documentation
 

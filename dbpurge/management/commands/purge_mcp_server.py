@@ -3,8 +3,10 @@ import logging
 import secrets
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 try:
     from typing_extensions import TypedDict
@@ -19,14 +21,19 @@ from django.db import connection, transaction
 from django.db.models import DateField, DateTimeField, Model, QuerySet
 from django.utils import timezone
 
-try:
+if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fastmcp.exceptions import ToolError
-except ImportError:
-    FastMCP = None
+else:
+    try:
+        from fastmcp import FastMCP
+        from fastmcp.exceptions import ToolError
+    except ImportError:
+        FastMCP = None
 
-    class ToolError(Exception):
-        """Stand-in for fastmcp.exceptions.ToolError when fastmcp is absent."""
+        class ToolError(Exception):
+            """Stand-in for fastmcp.exceptions.ToolError when fastmcp is absent."""
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +43,23 @@ MISSING_FASTMCP_ERROR = (
 )
 
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
 class _MissingMCP:
     """Stand-in for FastMCP when fastmcp is absent, so this module stays importable."""
 
-    def tool(self, fn):
+    def tool(self, fn: _F) -> _F:
         return fn
 
 
-mcp = FastMCP("django-db-purge") if FastMCP is not None else _MissingMCP()
+# The stand-in only lets this module import without the [mcp] extra. handle()
+# refuses to run in that case, so the cast never reaches a real tool call.
+mcp: "FastMCP[Any]" = (
+    FastMCP("django-db-purge")
+    if FastMCP is not None
+    else cast("FastMCP[Any]", _MissingMCP())
+)
 
 TOKEN_TTL = timedelta(minutes=5)
 PREVIEW_SAMPLE_SIZE = 5
@@ -143,9 +159,11 @@ def validate_policy(
     positive integer.
     """
     try:
-        model = apps.get_model(app_label=app_name, model_name=model_name)
-    except LookupError:
-        raise PurgePolicyError(f"Model '{model_name}' in app '{app_name}' not found")
+        model: type[Model] = apps.get_model(app_label=app_name, model_name=model_name)
+    except LookupError as exc:
+        raise PurgePolicyError(
+            f"Model '{model_name}' in app '{app_name}' not found"
+        ) from exc
 
     if not _is_allowed_model(model):
         raise PurgePolicyError(
@@ -155,10 +173,10 @@ def validate_policy(
 
     try:
         field = model._meta.get_field(time_column)
-    except FieldDoesNotExist:
+    except FieldDoesNotExist as exc:
         raise PurgePolicyError(
             f"Column '{time_column}' does not exist on model '{model_name}'"
-        )
+        ) from exc
     if not isinstance(field, (DateField, DateTimeField)):
         raise PurgePolicyError(
             f"Column '{time_column}' on model '{model_name}' is not a date or "
@@ -276,11 +294,9 @@ def token_is_valid(
         return False
     if timezone.now() >= record.expires_at:
         return False
-    if record.params_hash != _hash_params(
+    return record.params_hash == _hash_params(
         app_name, model_name, time_column, retention_seconds
-    ):
-        return False
-    return True
+    )
 
 
 def _pop_valid_token(
@@ -417,7 +433,9 @@ def preview_purge(
     to actually delete rows. This tool performs no deletion.
     """
     try:
-        return preview_purge_candidates(app_name, model_name, time_column, retention_seconds)
+        return preview_purge_candidates(
+            app_name, model_name, time_column, retention_seconds
+        )
     except PurgePolicyError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -613,7 +631,7 @@ def configure_stderr_logging(level: int = logging.INFO) -> None:
 class Command(BaseCommand):
     help = "Run the django-db-purge MCP server over stdio"
 
-    def handle(self, *args, **options):
+    def handle(self, *args: Any, **options: Any) -> None:
         if FastMCP is None:
             raise CommandError(MISSING_FASTMCP_ERROR)
         configure_stderr_logging()

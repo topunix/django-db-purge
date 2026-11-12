@@ -9,11 +9,11 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from dbpurge.management.commands.purge_mcp_server import (
+    _TOKENS,
     MISSING_FASTMCP_ERROR,
     TOKEN_ERROR_MESSAGE,
     PurgePolicyError,
     PurgeRowSetChangedError,
-    _TOKENS,
     execute_purge_candidates,
     get_purge_candidates,
     preview_purge_candidates,
@@ -54,9 +54,15 @@ class TestPreviewPurgeCandidates(TestCase):
         preview = preview_purge_candidates(*self.params)
 
         self.assertEqual(preview["row_count"], 1)
-        self.assertEqual(preview["sample_rows"], [
-            {"pk": self.old_record.pk, "created_at": self.old_record.created_at.isoformat()}
-        ])
+        self.assertEqual(
+            preview["sample_rows"],
+            [
+                {
+                    "pk": self.old_record.pk,
+                    "created_at": self.old_record.created_at.isoformat(),
+                }
+            ],
+        )
         self.assertTrue(token_is_valid(preview["confirmation_token"], *self.params))
 
     def test_caps_sample_rows_at_five(self):
@@ -95,9 +101,11 @@ class TestPreviewPurgeCandidates(TestCase):
         self.assertFalse(token_is_valid("not-a-real-token", *self.params))
 
     def test_denied_for_a_model_outside_the_allowlist(self):
-        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
-            with self.assertRaises(PurgePolicyError):
-                preview_purge_candidates(*self.params)
+        with (
+            override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]),
+            self.assertRaises(PurgePolicyError),
+        ):
+            preview_purge_candidates(*self.params)
 
     def test_allowlist_matches_regardless_of_casing(self):
         # An operator naturally reaches for "tests.samplerecord", the
@@ -144,24 +152,30 @@ class TestExecutePurgeCandidates(TestCase):
         self.assertEqual(message, TOKEN_ERROR_MESSAGE)
 
     def test_denied_for_a_model_outside_the_allowlist(self):
-        with override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
-            with self.assertRaises(PurgePolicyError):
-                execute_purge_candidates(*self.params, self.token)
+        with (
+            override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]),
+            self.assertRaises(PurgePolicyError),
+        ):
+            execute_purge_candidates(*self.params, self.token)
 
         self.assertEqual(SampleRecord.objects.count(), 1)
 
     def test_cap_breach_blocks_delete_and_leaves_token_usable(self):
-        with override_settings(DB_PURGE_MCP_MAX_ROWS=0):
-            with self.assertRaises(PurgePolicyError):
-                execute_purge_candidates(*self.params, self.token)
+        with (
+            override_settings(DB_PURGE_MCP_MAX_ROWS=0),
+            self.assertRaises(PurgePolicyError),
+        ):
+            execute_purge_candidates(*self.params, self.token)
 
         self.assertEqual(SampleRecord.objects.count(), 1)
         self.assertTrue(token_is_valid(self.token, *self.params))
 
     def test_retry_succeeds_after_a_cap_breach_is_resolved(self):
-        with override_settings(DB_PURGE_MCP_MAX_ROWS=0):
-            with self.assertRaises(PurgePolicyError):
-                execute_purge_candidates(*self.params, self.token)
+        with (
+            override_settings(DB_PURGE_MCP_MAX_ROWS=0),
+            self.assertRaises(PurgePolicyError),
+        ):
+            execute_purge_candidates(*self.params, self.token)
 
         result = execute_purge_candidates(*self.params, self.token)
 
@@ -317,14 +331,15 @@ class TestRowSetFingerprinting(TestCase):
         def passthrough_select_for_update(self, *args, **kwargs):
             return self
 
-        with patch.object(
-            connection.features, "has_select_for_update", True
-        ), patch.object(
-            QuerySet,
-            "select_for_update",
-            autospec=True,
-            side_effect=passthrough_select_for_update,
-        ) as mock_select_for_update:
+        with (
+            patch.object(connection.features, "has_select_for_update", True),
+            patch.object(
+                QuerySet,
+                "select_for_update",
+                autospec=True,
+                side_effect=passthrough_select_for_update,
+            ) as mock_select_for_update,
+        ):
             result = execute_purge_candidates(*self.params, token)
 
         mock_select_for_update.assert_called_once()

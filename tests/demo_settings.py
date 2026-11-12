@@ -1,4 +1,4 @@
-from tests.settings import *  # noqa: F401,F403
+from tests.settings import *
 
 # File-backed sqlite, gitignored, so a demo database persists across
 # separate `seed_demo.py` and `purge_mcp_server` process runs, unlike
