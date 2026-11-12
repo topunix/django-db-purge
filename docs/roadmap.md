@@ -17,22 +17,21 @@ Shipped items are deleted in the PR that ships them.
 
 ## Sequenced queue
 
-Sequencing: CI on pull requests comes first, so every later branch is checked before it
-merges. The policy surface comes next, then logging, then the harness, then the
+Sequencing: Lint configuration comes first, so later branches are linted from the
+start. The policy surface comes next, then logging, then the harness, then the
 release. The harness attacks the final 2.0 interface once instead of being rewritten
 after a signature change, and logging lands before it so attack cases can assert on what
 the server recorded. Attack registry design happens in chat while the policy items are
 implemented.
 
-1. **ci-on-pr**: run the test suite and checks on every pull request and on pushes to
-   `master`. Today tests and the wheel smoke test run only inside `publish.yml`, at
-   release time, so a broken branch is not caught until a release is attempted.
-   Decided: a separate workflow file. `publish.yml` keeps its own test and smoke steps
-   as the release gate.
-   Decided: the workflow runs `runtests.py`, mypy, ruff, and the wheel smoke test.
-   Resolve before starting (owner decision):
-   - Python and Django version matrix.
-   Verify: a workflow on `master` triggers on `pull_request` and runs `runtests.py`.
+1. **lint-config**: add ruff and mypy configuration and run both in CI. Neither tool
+   has any configuration in the repo today.
+   Decided: configuration lives in `pyproject.toml` under tool sections only.
+   Packaging stays in `setup.py`.
+   Resolve before starting (owner decisions):
+   - Ruff rule set.
+   - Mypy strictness.
+   Verify: the CI workflow on `master` runs ruff and mypy.
 
 2. **policy-registry**: replace the date-only MCP interface with operator-defined named
    policies. The agent selects a policy by name and supplies only bounded params. It
@@ -109,6 +108,8 @@ implemented.
    expressed as a policy, README structural reorganization, PyPI publish through the
    existing `publish.yml` release workflow.
    Depends on: every item above.
+   Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
+   match `python_requires`.
    Verify: PyPI `info.version` is 2.0.0 and the README has a migration section.
 
 8. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
