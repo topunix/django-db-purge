@@ -26,3 +26,10 @@ files = ["dbpurge"]
 [[tool.mypy.overrides]]
 module = "django.*"
 ignore_missing_imports = true
+
+# Without django-stubs, BaseCommand and AppConfig are Any, and strict mode
+# rejects subclassing Any. This override exists only because django-stubs is
+# absent. Remove it when the stubs are added.
+[[tool.mypy.overrides]]
+module = ["dbpurge.apps", "dbpurge.management.commands.*"]
+disallow_subclassing_any = false

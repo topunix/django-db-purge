@@ -1,6 +1,7 @@
 import logging
 import time
 from datetime import timedelta
+from typing import Any
 
 from django.apps import apps
 from django.conf import settings
@@ -29,7 +30,7 @@ DEFAULT_RETENTION_POLICIES = [
 class Command(BaseCommand):
     help = "Delete expired database records based on the retention policy"
 
-    def handle(self, *args, **options):
+    def handle(self, *args: Any, **options: Any) -> None:
         total_deleted_records = 0
         retention_policies = getattr(
             settings, "DB_PURGE_RETENTION_POLICIES", DEFAULT_RETENTION_POLICIES
@@ -46,7 +47,7 @@ class Command(BaseCommand):
             )
         )
 
-    def validate_policy(self, policy):
+    def validate_policy(self, policy: dict[str, Any]) -> None:
         app_name = policy.get("app_name")
         model_name = policy.get("model_name")
         time_based_column_name = policy.get("time_based_column_name")
@@ -75,8 +76,12 @@ class Command(BaseCommand):
             raise CommandError("data_retention_num_seconds must be a positive integer.")
 
     def delete_expired_records(
-        self, app_name, model_name, time_based_column_name, data_retention_num_seconds
-    ):
+        self,
+        app_name: str,
+        model_name: str,
+        time_based_column_name: str,
+        data_retention_num_seconds: int,
+    ) -> int:
         logger.info(
             "Checking for %s %s DB records to delete which are "
             "beyond retention period...",
@@ -97,7 +102,7 @@ class Command(BaseCommand):
         expired_records = model.objects.filter(
             **{f"{time_based_column_name}__lte": min_age_records_to_delete}
         )
-        deleted_count = expired_records.count()
+        deleted_count: int = expired_records.count()
         expired_records.delete()
         took = time.time() - start_time
         logger.info(
