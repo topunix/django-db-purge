@@ -324,9 +324,13 @@ def _pop_valid_token(
     so at most one caller can ever receive a non-None record for a
     given token: this closes the race where two concurrent
     execute_purge calls both observe the token as valid before either
-    consumes it. A caller that then fails for a reason that is not its
-    fault (for example a row-cap breach) must put the record back with
-    _reinstate_token so the token remains usable for a retry.
+    consumes it. A token that does not match (unknown, expired, or
+    bound to a different policy or different params) is gone and is not
+    put back: presenting it for something else burns it. Only a caller
+    that holds a matching record and then fails for a reason that is not
+    its fault (a row-cap breach, drift, a database error) must put the
+    record back with _reinstate_token so the token remains usable for a
+    retry.
     """
     record = _TOKENS.pop(token, None)
     if record is None:
@@ -482,11 +486,16 @@ def execute_purge_candidates(
     checked, so at most one caller can ever consume a given token even
     if two execute_purge calls race. Any mismatch, expiry, or unknown
     token raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the same
-    message regardless of which of those it was. The token is consumed
-    only once the delete actually succeeds: if the call fails for any
-    reason first, including a row-cap breach or a row-set fingerprint
-    mismatch (see below), the token is put back so a retry with the
-    same token can still succeed within its TTL.
+    message regardless of which of those it was. A token presented with
+    a different policy or different params is popped and not put back,
+    so that attempt burns it: the matching execute that follows is
+    rejected too and needs a fresh preview. (A call rejected earlier, by
+    an unknown policy or invalid params, never reaches the token and
+    leaves it alone.) Once the token matches, it is consumed only when
+    the delete actually succeeds: if the call then fails, for a row-cap
+    breach, a row-set fingerprint mismatch (see below) or a database
+    error, the token is put back so a retry with the same token can
+    still succeed within its TTL.
 
     The policy's max_rows (else DB_PURGE_MCP_MAX_ROWS) bounds the number
     of *matching* rows, the same count preview_purge reports, re-checked
@@ -592,11 +601,14 @@ def execute_purge(
     and a token issued for a different policy or different params all
     fail with the identical "invalid or expired confirmation token"
     message, by design: callers cannot distinguish why a token was
-    rejected. Tokens are single-use: only consumed once this call's
-    delete actually succeeds. If the call fails for any other reason (a
-    row-cap breach, or a row-set fingerprint mismatch), the token is
-    restored so a retry with the same token can still succeed within
-    its TTL.
+    rejected. Tokens are single-use. Presenting a token with a
+    different policy_name or different params uses it up: that call
+    fails and the token is gone, so the correct call afterwards is
+    rejected too and you must run preview_purge again. A token that
+    matches is consumed only once this call's delete actually succeeds.
+    If the call then fails (a row-cap breach, a row-set fingerprint
+    mismatch, or a database error), the token is restored so a retry
+    with the same token can still succeed within its TTL.
 
     The policy's max_rows (else DB_PURGE_MCP_MAX_ROWS) is re-checked
     against the live matching row count at execute time, even if

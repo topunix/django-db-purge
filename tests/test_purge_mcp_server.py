@@ -776,6 +776,46 @@ class TestTokenBinding(PolicyTestCase):
         self.assertEqual(str(ctx.exception), TOKEN_ERROR_MESSAGE)
         self.assertEqual(PolicyRecord.objects.count(), 1)
 
+    def test_a_token_used_with_another_policy_is_burned(self):
+        # A token presented with the wrong policy is popped and not
+        # reinstated, so the correct call afterwards fails too.
+        row = make_record(status="failed")
+        token = self.preview("failed_rows")["confirmation_token"]
+
+        with self.assertRaises(PurgePolicyError):
+            self.execute("other_failed_rows", token)
+        self.assertNotIn(token, _TOKENS)
+        with self.assertRaises(PurgePolicyError) as ctx:
+            self.execute("failed_rows", token)
+
+        self.assertEqual(str(ctx.exception), TOKEN_ERROR_MESSAGE)
+        self.assertTrue(PolicyRecord.objects.filter(pk=row.pk).exists())
+
+    def test_different_params_burn_the_token_for_the_correct_call(self):
+        make_record(created_at=timezone.now() - timedelta(days=2))
+        params = {"older_than_seconds": 3600}
+        token = self.preview("old_rows", params)["confirmation_token"]
+
+        with self.assertRaises(PurgePolicyError):
+            self.execute("old_rows", token, {"older_than_seconds": 7200})
+        with self.assertRaises(PurgePolicyError) as ctx:
+            self.execute("old_rows", token, params)
+
+        self.assertEqual(str(ctx.exception), TOKEN_ERROR_MESSAGE)
+        self.assertEqual(PolicyRecord.objects.count(), 1)
+
+    def test_a_request_rejected_before_the_token_check_leaves_it_alone(self):
+        make_record(created_at=timezone.now() - timedelta(days=2))
+        params = {"older_than_seconds": 3600}
+        token = self.preview("old_rows", params)["confirmation_token"]
+
+        with self.assertRaises(PurgePolicyError):
+            self.execute("old_rows", token, {"older_than_seconds": 5})
+        with self.assertRaises(PurgePolicyError):
+            self.execute("no_such_policy", token, params)
+
+        self.assertEqual(self.execute("old_rows", token, params)["deleted_count"], 1)
+
     def test_int_and_float_params_bind_different_tokens(self):
         make_record(score=7.0)
         token = self.preview("high_scores", {"min_score": 5})["confirmation_token"]
