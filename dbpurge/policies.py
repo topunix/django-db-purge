@@ -51,9 +51,9 @@ def is_allowed_model(model: type[Model]) -> bool:
 
     Matched case-insensitively. The recommended format is Django's own
     "app_label.ModelName" label (class-cased, e.g. "tests.SampleRecord"),
-    but list_purge_candidates surfaces model names in lowercase, so
-    either casing is accepted rather than silently rejecting whichever
-    one an operator copies in.
+    but Django's lowercase model_name form is easy to copy from the
+    shell or the admin, so either casing is accepted rather than
+    silently rejecting whichever one an operator writes.
     """
     allowed = {
         name.lower() for name in getattr(settings, "DB_PURGE_MCP_ALLOWED_MODELS", [])
@@ -396,6 +396,9 @@ def load_policies() -> dict[str, Policy]:
     An unset or empty setting returns an empty dict, meaning nothing is
     purgeable via MCP.
     """
+    # Validate the global cap even when no policy sets its own max_rows, so
+    # a bad DB_PURGE_MCP_MAX_ROWS fails here and not in the middle of a call.
+    get_max_rows_cap()
     raw = getattr(settings, "DB_PURGE_MCP_POLICIES", None)
     if raw is None:
         return {}

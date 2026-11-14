@@ -29,3 +29,21 @@ DB_PURGE_MCP_ALLOWED_MODELS = [
     "tests.PolicyRecord",
     "tests.PolicyNote",
 ]
+
+# Policies the agent may select by name. One temporal policy over the toy
+# model that the tests and the stdio e2e driver purge.
+DB_PURGE_MCP_POLICIES = {
+    "stale_samples": {
+        "model": "tests.SampleRecord",
+        "description": "Sample records older than the given age.",
+        "params": [
+            {
+                "name": "older_than_seconds",
+                "type": "age_seconds",
+                "field": "created_at",
+                "min": 1,
+                "max": 315360000,
+            },
+        ],
+    },
+}

@@ -92,16 +92,24 @@ async def run_checks(db_path: str) -> None:
             fail(f"initialize failed: {init_response}")
         await send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
+        listed = await call_tool(proc, 2, "list_policies", {})
+        if listed.get("isError"):
+            fail(f"list_policies returned an error: {listed}")
+        policies = listed["structuredContent"]["result"]
+        if [policy["name"] for policy in policies] != ["stale_samples"]:
+            fail(f"unexpected policy list: {policies}")
+        (policy,) = policies
+        blob = json.dumps(policy)
+        for forbidden in ("select", "exclude", "created_at"):
+            if forbidden in blob:
+                fail(f"list_policies leaked {forbidden!r}: {policy}")
+
+        params = {"older_than_seconds": 3600}
         preview = await call_tool(
             proc,
-            2,
+            3,
             "preview_purge",
-            {
-                "app_name": "tests",
-                "model_name": "samplerecord",
-                "time_column": "created_at",
-                "retention_seconds": 3600,
-            },
+            {"policy_name": "stale_samples", "params": params},
         )
         if preview.get("isError"):
             fail(f"preview_purge returned an error for a valid policy: {preview}")
@@ -109,56 +117,57 @@ async def run_checks(db_path: str) -> None:
         if candidates["row_count"] != 1:
             fail(f"expected row_count 1 (only the stale row), got {candidates}")
         sample_rows = candidates["sample_rows"]
-        if len(sample_rows) != 1 or set(sample_rows[0]) != {"pk", "created_at"}:
+        if len(sample_rows) != 1 or set(sample_rows[0]) != {"pk", "older_than_seconds"}:
             fail(f"unexpected sample_rows shape: {sample_rows}")
         if not candidates.get("confirmation_token") or not candidates.get(
             "token_expires_at"
         ):
             fail(f"missing token fields: {candidates}")
 
-        bad_model = await call_tool(
-            proc,
-            3,
-            "preview_purge",
-            {
-                "app_name": "tests",
-                "model_name": "nope",
-                "time_column": "created_at",
-                "retention_seconds": 3600,
+        rejected = {
+            "unknown policy": {"policy_name": "nope", "params": params},
+            "out of bounds": {
+                "policy_name": "stale_samples",
+                "params": {"older_than_seconds": 0},
             },
-        )
-        if not bad_model.get("isError"):
-            fail(f"expected an error for an unknown model, got {bad_model}")
+            "undeclared param": {
+                "policy_name": "stale_samples",
+                "params": {**params, "extra": 1},
+            },
+            "missing param": {"policy_name": "stale_samples"},
+            "float for an age": {
+                "policy_name": "stale_samples",
+                "params": {"older_than_seconds": 3600.0},
+            },
+        }
+        for offset, (label, arguments) in enumerate(rejected.items()):
+            response = await call_tool(proc, 10 + offset, "preview_purge", arguments)
+            if not response.get("isError"):
+                fail(f"expected {label} to be rejected, got {response}")
 
-        bad_column = await call_tool(
+        # A raw JSON true must be rejected, not read as the integer 1.
+        raw_true = await call_tool(
             proc,
-            4,
+            20,
             "preview_purge",
-            {
-                "app_name": "tests",
-                "model_name": "samplerecord",
-                "time_column": "label",
-                "retention_seconds": 3600,
-            },
+            {"policy_name": "stale_samples", "params": {"older_than_seconds": True}},
         )
-        if not bad_column.get("isError"):
-            fail(f"expected an error for a non-date column, got {bad_column}")
+        if not raw_true.get("isError"):
+            fail(f"expected JSON true to be rejected for a number, got {raw_true}")
 
         execute_args = {
-            "app_name": "tests",
-            "model_name": "samplerecord",
-            "time_column": "created_at",
-            "retention_seconds": 3600,
+            "policy_name": "stale_samples",
             "confirmation_token": candidates["confirmation_token"],
+            "params": params,
         }
-        executed = await call_tool(proc, 5, "execute_purge", execute_args)
+        executed = await call_tool(proc, 30, "execute_purge", execute_args)
         if executed.get("isError"):
             fail(f"execute_purge returned an error for a valid token: {executed}")
         result = executed["structuredContent"]
         if result["deleted_count"] != 1:
             fail(f"expected deleted_count 1, got {result}")
 
-        reused = await call_tool(proc, 6, "execute_purge", execute_args)
+        reused = await call_tool(proc, 31, "execute_purge", execute_args)
         if not reused.get("isError"):
             fail(
                 "expected a reused (already-consumed) token to be rejected, "
@@ -167,14 +176,9 @@ async def run_checks(db_path: str) -> None:
 
         after_delete = await call_tool(
             proc,
-            7,
+            32,
             "preview_purge",
-            {
-                "app_name": "tests",
-                "model_name": "samplerecord",
-                "time_column": "created_at",
-                "retention_seconds": 3600,
-            },
+            {"policy_name": "stale_samples", "params": params},
         )
         if after_delete["structuredContent"]["row_count"] != 0:
             fail(f"expected the stale row to be gone, got {after_delete}")

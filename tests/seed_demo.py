@@ -4,6 +4,10 @@ Seed demo.sqlite3 for manually trying the MCP server against real data.
 
 Run: python tests/seed_demo.py
 Then: DJANGO_SETTINGS_MODULE=tests.demo_settings python manage.py purge_mcp_server
+
+The rows are labelled demo-<age>d so both demo policies have something to
+match: stale_samples (by age) and demo_labelled_samples (by label, a
+non-temporal policy). See tests/demo_settings.py.
 """
 
 import os
