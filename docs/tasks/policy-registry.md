@@ -235,6 +235,13 @@ conflicts with text above, the ruling wins.
 - Internal invariants are checked with explicit raises, never `assert`, since asserts
   are stripped under `-O`.
 
+### Batch B review rulings
+- A token presented with a different policy or different params is popped and not
+  reinstated, so that attempt burns it and the correct execute afterwards is rejected.
+  This is kept deliberately. Only failures after the token matches (row cap, drift,
+  database errors) reinstate it, and a request rejected before the token check (an
+  unknown policy or invalid params) leaves it alone. The execute docstrings say so.
+
 ### Additional requirements
 - Non-finite numbers (NaN, Infinity, -Infinity) are rejected in requests and in config
   bounds. For `age_seconds`, max must be small enough that now minus max is a
