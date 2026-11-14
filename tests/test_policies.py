@@ -178,6 +178,20 @@ class TestLoadPolicies(PolicyConfigTestCase):
             [{"status": "x"}, "x", None], lambda v: policy(exclude=v)
         )
 
+    def test_empty_q_rejected_for_select_and_exclude(self):
+        empties = [Q(), ~Q(), Q(Q()), Q() & Q(), Q() | Q()]
+        for empty in empties:
+            with self.subTest(select=empty):
+                self.assertInvalid(policy(select=empty))
+            with self.subTest(exclude=empty):
+                self.assertInvalid(policy(exclude=empty))
+
+    def test_empty_select_does_not_count_as_a_select(self):
+        raw = policy(select=Q())
+        self.assertInvalid({**raw, "params": [AGE]})
+        self.load({"p": policy(select=~Q(status="held"))})
+        self.load({"p": policy(exclude=~Q(status="held"), params=[AGE])})
+
     def test_select_naming_a_missing_field_fails_at_load(self):
         self.assertInvalid(policy(select=Q(no_such_field=1)))
         self.assertInvalid(policy(exclude=Q(no_such_field=1)))
@@ -586,7 +600,7 @@ def make_record(**kwargs):
 
 class BuildQuerysetTestCase(TestCase):
     def matched(self, *params, params_given=None, now=NOW, **overrides):
-        overrides.setdefault("select", Q())
+        overrides.setdefault("select", Q(pk__gt=0))
         raw = policy(params=list(params), **overrides)
         with override_settings(DB_PURGE_MCP_POLICIES={"p": raw}):
             loaded = get_policy("p")

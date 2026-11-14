@@ -281,6 +281,13 @@ def _check_same_field_params(policy_name: str, params: tuple[Param, ...]) -> Non
             raise _bad(policy_name, "two params on one field need opposite ops")
 
 
+def _is_empty_q(condition: Q) -> bool:
+    """Return whether condition has no real condition in it, negated or not."""
+    return all(
+        isinstance(child, Q) and _is_empty_q(child) for child in condition.children
+    )
+
+
 def _select_queryset(
     model: type[Model], select: Q | None, exclude: Q | None
 ) -> QuerySet[Any]:
@@ -326,6 +333,8 @@ def _load_policy(name: object, raw: object) -> Policy:
     for key, value in (("select", select), ("exclude", exclude)):
         if key in raw and not isinstance(value, Q):
             raise _bad(name, f"{key} must be a django.db.models.Q")
+        if isinstance(value, Q) and _is_empty_q(value):
+            raise _bad(name, f"{key} must not be an empty Q")
 
     raw_params = raw.get("params", [])
     if not isinstance(raw_params, list) or len(raw_params) > MAX_PARAMS:
