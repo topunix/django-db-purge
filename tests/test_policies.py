@@ -432,6 +432,7 @@ class TestGetPolicy(SimpleTestCase):
             get_policy("p")
             with (
                 override_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]),
+                self.assertLogs("dbpurge.policies", "ERROR"),
                 self.assertRaises(PurgePolicyError),
             ):
                 get_policy("p")
