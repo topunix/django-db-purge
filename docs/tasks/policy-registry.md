@@ -213,6 +213,15 @@ conflicts with text above, the ruling wins.
 10. For a DateField param, compare against the cutoff's date, not an aware datetime,
     with a test. The cron path is untouched.
 
+### Batch A review rulings
+- Integer fields: a `number` param on a field in the IntegerField family must have int
+  `min` and `max` at load (a float bound is refused), and the request value must be an
+  int. A float such as -5.5 can never reach the query, where the field would truncate
+  it silently.
+- Empty Q: `select` and `exclude` must not be an empty Q. A Q with no children is
+  refused at load, including a negated empty Q. A policy needs a non-empty `select` or
+  at least one param.
+
 ### Additional requirements
 - Non-finite numbers (NaN, Infinity, -Infinity) are rejected in requests and in config
   bounds. For `age_seconds`, max must be small enough that now minus max is a
