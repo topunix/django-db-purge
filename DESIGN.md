@@ -14,6 +14,8 @@ destructive step. Everything below follows from that.
 
 ## ADR 1: The preview, token, execute workflow
 
+*Amended by ADR 4: the tools now take a policy name, and the preview sample is the primary key plus each param's value, keyed by param name, not the time column.*
+
 ### Problem
 
 `execute_purge` deletes rows. The host LLM decides when to call it and
@@ -66,6 +68,8 @@ not attention.
 ---
 
 ## ADR 2: What the token binds, and how it is stored
+
+*Amended by ADR 4: the token binds a SHA-256 of canonical JSON of the policy name and the validated params, not the `(app_name, model_name, time_column, retention_seconds)` tuple.*
 
 ### Problem
 
@@ -142,6 +146,8 @@ otherwise yet.
 ---
 
 ## ADR 3: Row-set fingerprinting
+
+*Amended by ADR 4: rows are now taken in primary key order, not `(time_column, pk)` order, and the filter is the policy's conditions rather than a time column and cutoff.*
 
 ### Problem
 
@@ -306,3 +312,181 @@ fingerprinting, a row whose contents change between preview and execute
 but which still matches the filter is deleted without complaint. The
 approved thing was "this row", and it is still that row. Callers who
 disagree have `DB_PURGE_MCP_FINGERPRINT_FIELDS`.
+
+---
+
+## ADR 4: Operator-defined policies instead of agent-chosen filters
+
+### Problem
+
+The first interface took `app_name`, `model_name`, `time_column`, and
+`retention_seconds` from the agent. That hands the untrusted caller the
+choice of what to delete: any allowlisted model, any date column, any
+retention. The allowlist was the only boundary, and the human reviewing
+a preview saw a count and a few primary keys, which says little about
+whether the purge being proposed is one the operator ever intended. The
+interface could also express nothing but row age, so a purge by status
+or by a numeric threshold had no place in it.
+
+The threat is the same as in ADR 1: the caller can be wrong, confused,
+or steered by whatever it read upstream. The less the request can say,
+the less a bad request can do.
+
+### Chosen
+
+**The operator writes named policies in `DB_PURGE_MCP_POLICIES`, and the
+agent selects one by name.** A policy fixes the model, the optional
+`select` and `exclude` conditions, and up to two declared params with
+bounds. The agent supplies only those params. It never names a model, a
+column, or a filter, and no tool accepts `app_name`, `model_name`,
+`time_column`, or `retention_seconds`. Row age becomes one kind of policy
+(`age_seconds`) next to `number` and `choice` params.
+
+**`select` and `exclude` are Django `Q` objects, written by the
+operator.** They are code in the settings file, never text from a
+request, and `list_policies` does not return them or the fields a param
+filters on. `action` exists and defaults to `"delete"`, so a later verb
+is additive, but nothing other than `"delete"` is accepted.
+
+**Loading fails closed.** `load_policies()` validates the whole registry
+and raises `ImproperlyConfigured` on the first violation, so a typo
+disables every policy instead of dropping one quietly. It rejects
+unknown keys, a model that is not in `DB_PURGE_MCP_ALLOWED_MODELS`, a
+policy with neither `select` nor a param, an empty `Q`, a param on the
+primary key, a relation, or a field name containing `__`, a param named
+`pk`, a same-field pair that is not an opposite-direction pair, and a
+`max_rows` above the global cap. It also compiles `select` and `exclude`
+without running them, so a `Q` that names a missing field fails at load
+and not in the middle of a preview. The management command loads once
+before serving and turns a failure into a `CommandError`.
+
+**Requests are validated on the values as received, before any query.**
+The supplied keys must equal the declared names exactly, with no
+defaults. Types are exact: a bool is never a number, NaN and infinity
+are rejected, an integer column takes only ints, an age is an int, and a
+choice must equal a declared entry by type and value. A same-field pair
+must describe a non-empty window, and equal bounds are valid only when
+both ends are inclusive. Error messages name only declared params and
+never echo supplied text, and an unknown policy name is rejected without
+being repeated or logged. FastMCP coerced a JSON `true` into the integer
+1 for the declared `int | float | str` values, so the tool signatures use
+pydantic strict types, which leaves the generated JSON schema unchanged
+and lets the check see what the client sent.
+
+**Policies are reloaded on every call.** There is no cache, so the
+allowlist and the config are re-checked each time. If loading fails
+during a call, the client gets one opaque error and the detail goes to
+the server log.
+
+**The token binds the policy name and the validated params.** The hash is
+SHA-256 over canonical JSON (`sort_keys`, compact separators) of the
+policy name and the validated params. That replaces the `|` join in ADR 2,
+whose delimiter was ambiguous in principle, since a value containing it could collide with a different tuple. Values are
+hashed as received, so `5` and `5.0` give different tokens. That can only
+make a token fail to match, never match wrongly. A token presented with a
+different policy or different params is popped and not reinstated, so the
+attempt burns it. That is deliberate: a mismatch is a caller error, and
+reinstating the token would turn it into an oracle for near-miss params.
+Only failures after the token matches (row cap, drift, database errors)
+reinstate it.
+
+**The matched row set is one row per record.** `build_queryset` runs the
+conditions in a subquery and selects the model by primary key, so a
+`select` or `exclude` that joins a to-many relation cannot duplicate a
+row, and no `DISTINCT` is needed. Some backends refuse `FOR UPDATE`
+together with `DISTINCT`, so this keeps the optional lock from ADR 3
+usable. A `DateField` param compares against the cutoff's calendar date,
+not an aware datetime.
+
+**Row cap per policy.** The effective cap is the policy's `max_rows` if
+set, else `DB_PURGE_MCP_MAX_ROWS`, and both must be positive integers. A
+preview whose count exceeds it is refused and no token is issued, and
+execute re-checks it as before.
+
+**Previews reveal values, not columns.** A sample row is the primary key
+plus the value of each param, keyed by param name. `list_policies` shows
+each param's name, type, op, and bounds or choices, and whether a number
+param is integer-only, but no field names.
+
+**The preview, single-use token, 5 minute TTL, atomic pop, delete by
+stored primary key list, fingerprint, and drift rejection from ADR 1 to
+3 are unchanged.** The snapshot now takes its slice in primary key order.
+
+### Rejected
+
+**Agent-supplied filters** (a JSON predicate, a Q-like DSL, or a SQL
+fragment). The agent would then write the delete predicate, so a prompt
+injection becomes an arbitrary predicate. Validating a filter language
+safely is a large surface of its own, and every field and operator it
+allowed would be one more way to reach rows the operator never meant to
+expose. Declared, bounded params give the agent a few numbers to choose
+and nothing to author.
+
+**A `days` shim**, keeping the old signature as a deprecated alias for a
+built-in age policy. It would keep the interface that lets the agent name
+a model and a column alive as a second path to the same delete, so the
+guarantee "no tool accepts a model or a column" would not hold. The old
+call is a breaking change and is expressed as a policy instead.
+
+**Dropping the allowlist, since policies already name their models.** A
+policy is a sharper tool than a model name, and one that points at the
+wrong model, through a typo or a copy and paste, would be live the moment
+it loaded. The allowlist is a separate, short list an operator can read
+at a glance, empty means nothing is purgeable, and requiring a model to
+appear in both places means one slip cannot expose it.
+
+**Caching the loaded policies at startup.** It would save a little work
+per call, but the allowlist and config would then be checked once and
+trusted afterwards. Loading per call keeps every call on the same
+checked path.
+
+**Reinstating a token after a mismatched execute.** It would be kinder to
+a confused caller and would let a caller probe how close its params are
+to the previewed ones.
+
+**Defaults for params.** A missing param is an error, so the token and the
+preview always bind the same, fully stated request.
+
+**`DISTINCT` to deduplicate joins.** Some backends refuse `FOR UPDATE`
+with it, which would have forced a weaker guarantee there.
+
+### Accepted limitations
+
+**The row cap does not bound an aggregate.** It is per call. An agent can
+slice a purge across params, for example many narrow age windows, and
+delete far more than `max_rows` over many previews and executes, each one
+under the cap. Each call is still previewed, but nothing counts the total.
+The adversarial harness item tracks this gap.
+
+**A preview is a read oracle on the param fields.** An agent can choose
+params and read back counts and sample values, so repeated previews can
+map the distribution of those columns, within the bounds the operator set.
+Params are the only fields exposed, and a policy that should not reveal a
+column should not declare a param on it.
+
+**Tokens are not bound to the policy definition.** The token binds the
+policy name and the params, not the `select`, `exclude`, or `max_rows` in
+force at preview. If the operator edits a policy between preview and
+execute and restarts the server, the old token still matches by name. The
+fingerprint re-check then runs against the new definition, so a changed
+filter will usually surface as drift, but it is not guaranteed.
+
+**Settings are frozen at startup.** Django reads settings once, so a
+change to a policy or to the allowlist needs a restart. Per-call loading
+re-validates what the process already holds and does not re-read the file,
+so revocation is not immediate.
+
+**The token store can grow.** Tokens live in process memory and are
+evicted only when a later preview issues one, so many previews within the
+5 minute TTL each hold up to `max_rows` primary keys until they expire.
+That is bounded by the cap and the TTL but not by a count of previews. It
+is part of the same in-process store described in ADR 2.
+
+**Equal numbers of different type are different tokens.** `5` and `5.0`
+bind differently, so a client that previews with one and executes with the
+other is rejected and burned. That fails safe.
+
+**The cap slice only affects the stored fingerprint.** Because an
+over-cap execute is refused before the fingerprint is consulted, taking
+the slice in primary key order, and not oldest first as in ADR 3, changes
+only what a stored fingerprint covers.
