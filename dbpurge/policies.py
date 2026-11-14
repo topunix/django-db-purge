@@ -99,6 +99,7 @@ class Param:
     op: str | None = None
     minimum: int | float | None = None
     maximum: int | float | None = None
+    integer_only: bool = False
     choices: tuple[str, ...] | tuple[int, ...] | None = None
 
 
@@ -185,6 +186,7 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
         )
 
     minimum, maximum = raw["min"], raw["max"]
+    integer_only = False
     if param_type == "age_seconds":
         if not isinstance(field, DateField):
             raise _bad(policy_name, f"param {name!r}: field must be a date or datetime")
@@ -197,6 +199,7 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
             raise _bad(policy_name, f"param {name!r}: need 0 < min <= max")
         _check_age_seconds_max(policy_name, maximum)
     else:
+        integer_only = isinstance(field, IntegerField)
         if not isinstance(field, (IntegerField, FloatField, DecimalField)):
             raise _bad(policy_name, f"param {name!r}: field must be numeric")
         op = raw["op"]
@@ -205,6 +208,11 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
         if not _is_finite_number(minimum) or not _is_finite_number(maximum):
             raise _bad(
                 policy_name, f"param {name!r}: min and max must be finite numbers"
+            )
+        if integer_only and not (_is_int(minimum) and _is_int(maximum)):
+            raise _bad(
+                policy_name,
+                f"param {name!r}: min and max must be integers for an integer field",
             )
         if minimum > maximum:
             raise _bad(policy_name, f"param {name!r}: need min <= max")
@@ -215,6 +223,7 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
         op=op,
         minimum=minimum,
         maximum=maximum,
+        integer_only=integer_only,
     )
 
 
@@ -461,7 +470,9 @@ def _validate_value(param: Param, value: object) -> ParamValue:
         return value
     if isinstance(value, str):
         raise PurgePolicyError(f"param {param.name!r} must be a number")
-    if param.type == "age_seconds" and not isinstance(value, int):
+    if (param.type == "age_seconds" or param.integer_only) and not isinstance(
+        value, int
+    ):
         raise PurgePolicyError(f"param {param.name!r} must be an integer")
     if isinstance(value, float) and not math.isfinite(value):
         raise PurgePolicyError(f"param {param.name!r} must be finite")

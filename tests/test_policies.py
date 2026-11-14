@@ -325,6 +325,21 @@ class TestParamConfig(PolicyConfigTestCase):
         )
         self.load({"p": policy(params=[{**NUMBER, "min": 0.5, "max": 0.5}])})
 
+    def test_integer_field_needs_integer_bounds(self):
+        level = {**NUMBER, "field": "level", "min": -10, "max": 10}
+        self.load({"p": policy(params=[level])})
+        for bounds in ((-10.5, 10), (-10, 10.5), (-10.0, 10.0), (0.5, 0.5)):
+            with self.subTest(bounds=bounds):
+                self.assertInvalid(
+                    policy(params=[{**level, "min": bounds[0], "max": bounds[1]}])
+                )
+
+    def test_float_bounds_stay_valid_on_float_and_decimal_fields(self):
+        for field in ("score", "amount"):
+            with self.subTest(field=field):
+                number = {**NUMBER, "field": field, "min": -1.5, "max": 1.5}
+                self.load({"p": policy(params=[number])})
+
     def test_number_field_must_be_numeric(self):
         self.assertInvalid(policy(params=[{**NUMBER, "field": "status"}]))
         self.assertInvalid(policy(params=[{**NUMBER, "field": "created_at"}]))
@@ -501,6 +516,46 @@ class TestValidateRequest(RequestTestCase):
         loaded = self.policy_with(CHOICE)
         message = self.assertRejected(loaded, {"status": "evil\nINJECTED"})
         self.assertNotIn("INJECTED", message)
+
+
+class TestIntegerFieldRequests(TestCase):
+    level = {
+        **NUMBER,
+        "name": "level",
+        "field": "level",
+        "op": "lt",
+        "min": -10,
+        "max": 10,
+    }
+
+    def loaded(self, param):
+        with override_settings(DB_PURGE_MCP_POLICIES={"p": policy(params=[param])}):
+            return get_policy("p")
+
+    def test_float_values_are_rejected_without_touching_the_database(self):
+        loaded = self.loaded(self.level)
+        for value in (-5.5, 5.0, 0.5, -0.0):
+            with (
+                self.subTest(value=value),
+                self.assertNumQueries(0),
+                self.assertRaises(PurgePolicyError),
+            ):
+                validate_request(loaded, {"level": value})
+
+    def test_integer_values_are_accepted_and_filter_exactly(self):
+        low = make_record(status="failed", level=-8)
+        make_record(status="failed", level=-5)
+        loaded = self.loaded(self.level)
+        validated = validate_request(loaded, {"level": -5})
+        matched = build_queryset(loaded, validated, NOW)
+        self.assertEqual(list(matched), [low])
+
+    def test_float_values_stay_valid_on_a_float_field(self):
+        score = {**NUMBER, "min": -10, "max": 10}
+        loaded = self.loaded(score)
+        self.assertEqual(
+            validate_request(loaded, {"min_score": -5.5}), {"min_score": -5.5}
+        )
 
 
 class TestWindowValidation(RequestTestCase):
