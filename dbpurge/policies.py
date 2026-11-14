@@ -63,6 +63,8 @@ def is_allowed_model(model: type[Model]) -> bool:
 
 POLICY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_PARAMS = 2
+# Keys the preview sample rows already use, so a param may not take them.
+RESERVED_PARAM_NAMES = frozenset({"pk"})
 
 ParamType = Literal["age_seconds", "number", "choice"]
 ParamOp = Literal["lt", "lte", "gt", "gte"]
@@ -173,6 +175,8 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
     name = raw["name"]
     if not isinstance(name, str) or not POLICY_NAME_RE.fullmatch(name):
         raise _bad(policy_name, f"param name must match {POLICY_NAME_RE.pattern}")
+    if name in RESERVED_PARAM_NAMES:
+        raise _bad(policy_name, f"param name {name!r} is reserved")
     field_name = raw["field"]
     if not isinstance(field_name, str) or "__" in field_name:
         raise _bad(policy_name, f"param {name!r}: field must be a plain field name")

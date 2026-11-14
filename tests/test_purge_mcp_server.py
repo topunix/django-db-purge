@@ -894,6 +894,15 @@ class TestAgentSuppliedText(PolicyTestCase):
 
 
 class TestPreviewShape(PolicyTestCase):
+    def test_the_pk_in_a_sample_row_is_the_real_primary_key(self):
+        row = make_record(status="failed", score=7.5)
+
+        preview = self.preview("high_scores", {"min_score": 5})
+
+        (sample,) = preview["sample_rows"]
+        self.assertEqual(sample["pk"], row.pk)
+        self.assertEqual(sample["min_score"], 7.5)
+
     def test_no_preview_response_uses_a_model_field_name_as_a_key(self):
         row = make_record(status="failed", score=7.0)
         field_names = {f.name for f in PolicyRecord._meta.get_fields()} | {

@@ -225,6 +225,14 @@ class TestLoadPolicies(PolicyConfigTestCase):
             ["Bad", "", "a-b", 3], lambda v: policy(params=[{**AGE, "name": v}])
         )
 
+    def test_pk_is_a_reserved_param_name(self):
+        # Preview sample rows key the primary key as "pk", so a param of the
+        # same name would overwrite it.
+        for param in (AGE, NUMBER, CHOICE):
+            with self.subTest(type=param["type"]):
+                self.assertInvalid(policy(params=[{**param, "name": "pk"}]))
+        self.load({"p": policy(params=[{**AGE, "name": "pk_age"}])})
+
     def test_same_field_pair_must_be_the_same_range_type(self):
         number_on_level = {**NUMBER, "field": "level"}
         self.assertInvalid(
