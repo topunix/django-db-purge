@@ -222,6 +222,19 @@ conflicts with text above, the ruling wins.
   refused at load, including a negated empty Q. A policy needs a non-empty `select` or
   at least one param.
 
+### Batch B rulings
+- Over-cap previews are refused: a preview whose match count exceeds the effective cap
+  raises an error and issues no token. The error reports the match count and the
+  effective cap and never echoes agent-supplied text. This is a behavior change from
+  1.x, where preview reported any count. Record it in the release-2-0 migration note.
+- A policy load failure at startup stops the command with `CommandError`, carrying the
+  detail and chained from the `ImproperlyConfigured` that `load_policies()` raised.
+- `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, validated whenever policies load,
+  so a value of 0 is invalid. In 1.x a value of 0 blocked every purge. This is a
+  behavior change. Record it in the release-2-0 migration note.
+- Internal invariants are checked with explicit raises, never `assert`, since asserts
+  are stripped under `-O`.
+
 ### Additional requirements
 - Non-finite numbers (NaN, Infinity, -Infinity) are rejected in requests and in config
   bounds. For `age_seconds`, max must be small enough that now minus max is a
