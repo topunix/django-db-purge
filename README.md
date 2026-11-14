@@ -1,81 +1,163 @@
----
+# django-db-purge
 
-## Django Database Purge
+[![PyPI](https://img.shields.io/pypi/v/django-db-purge)](https://pypi.org/project/django-db-purge/)
+[![CI](https://github.com/topunix/django-db-purge/actions/workflows/ci.yml/badge.svg)](https://github.com/topunix/django-db-purge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-django-db-purge deletes expired database records based on configurable retention policies, run as a scheduled Django management command. It also ships an MCP server so an AI agent can purge records by operator-defined policy. The operator decides what each named policy selects, the agent only picks a policy and supplies bounded params, and every deletion goes through a preview, token, execute handshake. Row age is one kind of policy among several.
+Guarded database purging for Django. An MCP server lets an AI agent delete
+rows through policies the operator defines: the agent picks a policy by name
+and supplies bounded params, and nothing is deleted without a prior preview of
+exactly those rows. A separate management command purges rows by age on a
+schedule.
 
-### Features:
+> **Status:** this README describes `master`, which is ahead of PyPI. The
+> policy interface below is unreleased. For the published 1.3.0 package, see
+> the [1.3.0 README](https://github.com/topunix/django-db-purge/blob/v1.3.0/README.md).
 
-- **Flexible Retention Policy**: Define your own retention policy to determine which records should be purged from the database.
-- **Efficient Data Management**: Easily manage the size of your database by removing outdated or unnecessary records.
-- **Customizable**: Adapt the command to suit your project's specific requirements and database structure.
-- **Safe**: Built-in safeguards to prevent accidental data loss, ensuring that only the intended records are purged.
-- **Agent-safe MCP tools**: Optionally let an AI agent purge records through operator-defined named policies. The agent selects a policy by name and supplies only the bounded params it declares, never a model, a column, or a filter, and a preview, token, execute handshake blocks deletion without a matching prior preview.
-- **Policies beyond row age**: On the MCP path a policy can select rows by status, by a numeric threshold, or by an age or an age window. Age is one kind of policy, not the only one.
-- **Row-set bound deletion**: A preview binds the exact rows it matched. Execution deletes only those rows, by primary key, and rejects the call outright if the row set drifted in between, so a concurrent write can never widen a purge.
+## Features
 
-## Scheduled purging (cron)
+- **Preview, token, execute handshake**: `execute_purge` only accepts a
+  single-use token from a matching `preview_purge` call, valid for 5 minutes.
+- **Operator-defined policies**: the agent never names a model, a column, or a
+  filter. A policy can select by status, a numeric threshold, a choice, or age.
+- **Row-set bound deletion**: execution deletes the previewed rows by primary
+  key and is rejected if the matching set changed in between.
+- **Bounded by default**: an empty model allowlist until you configure it, and
+  a row cap checked at both preview and execute.
+- **Scheduled retention**: an age-based management command for cron.
 
-### How to Use:
-1. Install django-db-purge by running:
+The package has two entry points with separate settings:
+
+| Entry point | Command | Setting | Selects rows by |
+| --- | --- | --- | --- |
+| MCP server | `purge_mcp_server` | `DB_PURGE_MCP_POLICIES` | Named policies |
+| Scheduler | `db_purge` | `DB_PURGE_RETENTION_POLICIES` | Age only |
+
+## Requirements
+
+- Python 3.10 or newer. CI runs on 3.10 and 3.12.
+- Tested against the current Django release.
+
+## Installation
+
 ```bash
-pip install django-db-purge
+pip install django-db-purge            # scheduled purging only
+pip install "django-db-purge[mcp]"     # adds the MCP server (fastmcp)
 ```
-2. Include 'dbpurge' in your INSTALLED_APPS settings. 
-3. Add a `DB_PURGE_RETENTION_POLICIES` list to your project's `settings.py`, based on your requirements. Below is a guide on how to set up the retention policies:
 
-    #### 1. `app_name`
+Add `'dbpurge'` to `INSTALLED_APPS`.
 
-    - **Description**: Name of the Django app containing the model.
-    - **Example**: `my_django_app`
-
-    #### 2. `model_name`
-
-    - **Description**: Name of the Django model from which records will be deleted.
-    - **Example**: `MyModel`
-
-    #### 3. `time_based_column_name`
-
-    - **Description**: Name of the column in the model that contains the timestamp or datetime field used for determining the age of records.
-    - **Example**: `created_at`
-
-    #### 4. `data_retention_num_seconds`
-
-    - **Description**: Time duration in seconds for which records will be retained before deletion.
-    - **Example**: `2592000` (for 30 days)
-
-    #### Example:
-
-    ```python
-    # settings.py
-    DB_PURGE_RETENTION_POLICIES = [
-        {
-            'app_name': 'my_django_app',
-            'model_name': 'MyModel',
-            'time_based_column_name': 'created_at',
-            'data_retention_num_seconds': 2592000,  # 30 days in seconds
-        },
-        # Add more retention policies as needed
-    ]
-    ```
-    If `DB_PURGE_RETENTION_POLICIES` is not set, the command falls back to a placeholder policy that will fail validation until you configure it, so there's no risk of silently deleting the wrong table.
-4. Then, either periodically call the db_purge management command (e.g., via a system cronjob), or install and configure django-cron.
-
----
+If `fastmcp` is not installed, running `purge_mcp_server` fails immediately with a `CommandError` pointing back at this install command, rather than a raw import traceback.
 
 ## MCP server
 
 django-db-purge also ships an MCP server that exposes operator-defined purge policies to an AI agent, with guardrails so an agent can never delete rows without a prior preview of exactly those rows. It runs inside Django as a management command and speaks the MCP protocol over stdio, so it works with Claude Desktop, the MCP Inspector, or any other MCP-capable host. The server makes no LLM API calls of its own: the host runs the model, and this process only exposes deterministic, schema-validated tools.
 
-### Installation
+### Try it
 
-The MCP server needs `fastmcp`, which is an optional extra, not part of the base install:
+From a checkout of this repo, seed a demo database and start the server:
 
 ```bash
-pip install "django-db-purge[mcp]"
+pip install -e ".[mcp]"
+python tests/seed_demo.py
+DJANGO_SETTINGS_MODULE=tests.demo_settings python -m django purge_mcp_server
 ```
 
-If `fastmcp` is not installed, running `purge_mcp_server` fails immediately with a `CommandError` pointing back at this install command, rather than a raw import traceback.
+### Example session
+
+This session was captured from a real run against the demo database, calling
+the tools through an in-process `fastmcp.Client`, with JSON reformatted for
+width only.
+
+`list_policies` returns each policy's name, description, and bounded params,
+and never the model fields they filter on.
+
+```json
+[
+  {
+    "name": "stale_samples",
+    "description": "Sample records older than the given age.",
+    "model": "tests.SampleRecord",
+    "action": "delete",
+    "max_rows": 10000,
+    "params": [
+      {
+        "name": "older_than_seconds",
+        "type": "age_seconds",
+        "op": "lte",
+        "min": 1,
+        "max": 315360000
+      }
+    ]
+  },
+  {
+    "name": "demo_labelled_samples",
+    "description": "Sample records with one of the demo labels.",
+    "model": "tests.SampleRecord",
+    "action": "delete",
+    "max_rows": 10000,
+    "params": [
+      {
+        "name": "label",
+        "type": "choice",
+        "choices": [
+          "demo-1d",
+          "demo-12d",
+          "demo-23d"
+        ]
+      }
+    ]
+  }
+]
+```
+
+`preview_purge` validates the params, counts the matching rows, and returns a
+sample and a confirmation token. Nothing is deleted.
+
+```json
+{
+  "row_count": 4,
+  "sample_rows": [
+    {
+      "pk": 7,
+      "older_than_seconds": "2026-09-08T23:06:02.421221+00:00"
+    },
+    {
+      "pk": 8,
+      "older_than_seconds": "2026-08-28T23:06:02.421221+00:00"
+    },
+    {
+      "pk": 9,
+      "older_than_seconds": "2026-08-17T23:06:02.421221+00:00"
+    },
+    {
+      "pk": 10,
+      "older_than_seconds": "2026-08-06T23:06:02.421221+00:00"
+    }
+  ],
+  "confirmation_token": "zVY_3W16xxZ5wlMiTBsGnHnag6oi1u1PolmtTaEjujc",
+  "token_expires_at": "2026-11-14T23:11:04.742269+00:00"
+}
+```
+
+Sample rows show the current value of each param's column, keyed by the param name. The column name itself is never returned.
+
+`execute_purge` with that token and the same params deletes the previewed rows.
+
+```json
+{
+  "deleted_count": 4,
+  "duration_seconds": 0.003634631000011268
+}
+```
+
+Replaying the same execute call, or previewing a value outside the policy's
+bounds, is rejected.
+
+```text
+execute_purge (same token again): invalid or expired confirmation token
+preview_purge (older_than_seconds 0): param 'older_than_seconds' is out of bounds (1 to 315360000)
+```
 
 ### Tools
 
@@ -99,7 +181,7 @@ There is no path to deletion without a prior, matching preview:
 
 Tokens are single-use: a successful `execute_purge` consumes the token, so it cannot be replayed. Tokens are also bound to the policy name and the exact validated params that produced them, so changing either invalidates the token even if it hasn't expired. A token presented with a different policy or different params is used up by that attempt, so the correct call afterwards is rejected too and needs a fresh preview. Once a token matches, a failure that isn't the caller's fault, such as a row-cap breach, a row-set change below, or a database error, reinstates it so a retry with the same token can still succeed.
 
-A token binds the exact set of rows the preview matched, not just the parameters. `execute_purge` deletes only those rows, by primary key, so a row that starts matching the policy after the preview is never deleted. Before deleting, it re-runs the policy's filter (its `select`, its `exclude`, and the params) and compares a fingerprint of the matched rows against the preview's; if the row set has changed, the call is rejected with a distinct error naming both row counts, and you need a fresh `preview_purge`. The fingerprint covers primary keys only by default, so a row that is modified but still matches is still deleted. Set `DB_PURGE_MCP_FINGERPRINT_FIELDS` to include specific column values in it and reject in-place modifications too. See [DESIGN.md](DESIGN.md) for the full rationale, including the cascade limitation.
+A token binds the exact set of rows the preview matched, not just the parameters. `execute_purge` deletes only those rows, by primary key, so a row that starts matching the policy after the preview is never deleted. Before deleting, it re-runs the policy's filter (its `select`, its `exclude`, and the params) and compares a fingerprint of the matched rows against the preview's; if the row set has changed, the call is rejected with a distinct error naming both row counts, and you need a fresh `preview_purge`. The fingerprint covers primary keys only by default, so a row that is modified but still matches is still deleted. Set `DB_PURGE_MCP_FINGERPRINT_FIELDS` to include specific column values in it and reject in-place modifications too. See [DESIGN.md](https://github.com/topunix/django-db-purge/blob/master/DESIGN.md) for the full rationale, including the cascade limitation.
 
 ### Settings
 
@@ -188,9 +270,9 @@ python manage.py purge_mcp_server
 
 This boots Django (settings, ORM, app registry), validates `DB_PURGE_MCP_POLICIES`, and then serves the three tools above over stdio.
 
-### Claude Desktop configuration
+### Host configuration
 
-Add an entry to Claude Desktop's `claude_desktop_config.json`, pointing at your project's virtualenv Python and `manage.py`:
+**Claude Desktop**: add an entry to `claude_desktop_config.json`.
 
 ```json
 {
@@ -206,6 +288,14 @@ Add an entry to Claude Desktop's `claude_desktop_config.json`, pointing at your 
 
 Use the venv's Python directly (not a bare `python`), since `fastmcp` and your project's dependencies need to be importable.
 
+**Claude Code**:
+
+```bash
+claude mcp add --transport stdio django-db-purge \
+  -- /path/to/your/project/.venv/bin/python \
+  /path/to/your/project/manage.py purge_mcp_server
+```
+
 ### Inspecting the server
 
 To poke at the tools interactively, run the server through the MCP Inspector:
@@ -217,6 +307,55 @@ npx @modelcontextprotocol/inspector python manage.py purge_mcp_server
 Run this from inside your project's virtualenv (activated, or with that venv's `python` on `PATH`), so the `python` the Inspector spawns is the one with Django and `fastmcp` installed.
 
 A healthy `tools/list` response shows all three tools: `list_policies`, `preview_purge`, and `execute_purge`, each with a JSON schema derived from its type hints.
+
+## Scheduled purging (cron)
+
+The `db_purge` command deletes rows older than a retention period. It selects
+by age only and does not read `DB_PURGE_MCP_POLICIES`. It has no dry run, no
+row cap, and no confirmation step: each run deletes every matching row.
+
+Add `DB_PURGE_RETENTION_POLICIES` to `settings.py`:
+
+```python
+# settings.py
+DB_PURGE_RETENTION_POLICIES = [
+    {
+        'app_name': 'my_django_app',
+        'model_name': 'MyModel',
+        'time_based_column_name': 'created_at',
+        'data_retention_num_seconds': 2592000,  # 30 days in seconds
+    },
+]
+```
+
+| Key | Meaning | Example |
+| --- | --- | --- |
+| `app_name` | Django app containing the model | `my_django_app` |
+| `model_name` | Model to delete from | `MyModel` |
+| `time_based_column_name` | Date or datetime field that gives a row's age | `created_at` |
+| `data_retention_num_seconds` | Seconds a row is kept before deletion | `2592000` |
+
+If the setting is absent, the command falls back to a placeholder policy that
+fails validation, so it cannot silently delete the wrong table.
+
+Run it on a schedule, for example nightly at 03:00:
+
+```cron
+0 3 * * * cd /path/to/your/project && .venv/bin/python manage.py db_purge
+```
+
+## Known limits
+
+- **Cascades are not capped.** The row cap bounds the rows a policy matches.
+  `ON DELETE CASCADE` relations can remove more. See [ADR 3](https://github.com/topunix/django-db-purge/blob/master/DESIGN.md#adr-3-row-set-fingerprinting).
+- **Tokens live in process memory.** A restart discards them, and they are not
+  shared between processes. See [ADR 2](https://github.com/topunix/django-db-purge/blob/master/DESIGN.md#adr-2-what-the-token-binds-and-how-it-is-stored).
+- **Fingerprints cover primary keys by default.** A row modified in place that
+  still matches is still deleted, unless `DB_PURGE_MCP_FINGERPRINT_FIELDS` is set.
+- **stdio transport only.** There is no HTTP transport.
+- **The cron path has none of the MCP guardrails**, as stated above.
+
+## Development
 
 ### Running the tests
 
@@ -236,12 +375,10 @@ python tests/e2e_stdio.py
 
 This seeds a temporary sqlite database, spawns `python -m django purge_mcp_server`, and drives a full list, preview, execute, and replay-rejected round trip over JSON-RPC.
 
-### Contributions:
+## Contributing
 
-Contributions are welcome! If you encounter any issues or have suggestions for improvements, please submit an issue or pull request on GitHub.
+Issues and pull requests are welcome on GitHub.
 
-### License:
+## License
 
-This project is licensed under the MIT License.
-
----
+MIT. See [LICENSE](LICENSE).
