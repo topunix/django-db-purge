@@ -13,7 +13,7 @@ of the deliverable rather than afterthoughts.
 
 Expose the purge logic as MCP tools that an AI agent can discover and
 call, with guardrails that prevent an agent from executing destructive
-operations without a human-verifiable preview step.
+operations without a prior preview of exactly those rows.
 
 ## Architecture (decided, do not relitigate)
 
