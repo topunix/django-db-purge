@@ -65,6 +65,7 @@ POLICY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_PARAMS = 2
 
 ParamType = Literal["age_seconds", "number", "choice"]
+ParamOp = Literal["lt", "lte", "gt", "gte"]
 
 _POLICY_KEYS = {
     "model",
@@ -96,7 +97,7 @@ class Param:
     name: str
     type: ParamType
     field: str
-    op: str | None = None
+    op: ParamOp | None = None
     minimum: int | float | None = None
     maximum: int | float | None = None
     integer_only: bool = False
@@ -408,21 +409,30 @@ ParamValue = int | float | str
 _POLICIES_UNAVAILABLE = "Purge policies are not available"
 
 
-def get_policy(name: object) -> Policy:
+def get_policies() -> dict[str, Policy]:
     """
-    Load policies afresh and return the one called name.
+    Load and validate policies afresh, for use inside a tool call.
 
     Loading on every call means the allowlist and the config are
     re-checked each time, with no cache to go stale. If the config is
     invalid the client gets one opaque message and the detail goes to
-    the server log only. An unknown name is rejected without echoing
-    it, since it is agent-supplied text.
+    the server log only.
     """
     try:
-        policies = load_policies()
+        return load_policies()
     except ImproperlyConfigured as exc:
         logger.error("DB_PURGE_MCP_POLICIES failed validation: %s", exc)
         raise PurgePolicyError(_POLICIES_UNAVAILABLE) from None
+
+
+def get_policy(name: object) -> Policy:
+    """
+    Return the policy called name, loading policies afresh.
+
+    An unknown name is rejected without echoing it, since it is
+    agent-supplied text.
+    """
+    policies = get_policies()
     policy = policies.get(name) if isinstance(name, str) else None
     if policy is None:
         raise PurgePolicyError("Unknown purge policy. Call list_policies first.")

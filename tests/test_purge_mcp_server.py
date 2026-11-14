@@ -1,10 +1,12 @@
+import json
 from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.management import CommandError, call_command
 from django.db import connection
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -14,12 +16,13 @@ from dbpurge.management.commands.purge_mcp_server import (
     TOKEN_ERROR_MESSAGE,
     PurgePolicyError,
     PurgeRowSetChangedError,
+    describe_policies,
     execute_purge_candidates,
     get_purge_candidates,
     preview_purge_candidates,
     token_is_valid,
 )
-from tests.models import SampleRecord
+from tests.models import PolicyRecord, SampleRecord
 
 
 def expire_token(token):
@@ -353,3 +356,198 @@ class TestMissingFastMCP(TestCase):
             call_command("purge_mcp_server")
 
         self.assertEqual(str(ctx.exception), MISSING_FASTMCP_ERROR)
+
+
+FIELD_NAMES = {"created_at", "due_on", "level", "score", "amount", "status", "id"}
+
+LISTING_POLICIES = {
+    "stale_failed": {
+        "model": "tests.PolicyRecord",
+        "description": "Failed rows past retention.",
+        "select": Q(status="failed"),
+        "exclude": Q(status="held"),
+        "max_rows": 50,
+        "params": [
+            {
+                "name": "older_than_seconds",
+                "type": "age_seconds",
+                "field": "created_at",
+                "min": 60,
+                "max": 3600,
+            },
+        ],
+    },
+    "low_scores": {
+        "model": "tests.PolicyRecord",
+        "description": "Rows by numeric thresholds.",
+        "params": [
+            {
+                "name": "max_level",
+                "type": "number",
+                "field": "level",
+                "op": "lte",
+                "min": 0,
+                "max": 10,
+            },
+            {
+                "name": "max_score",
+                "type": "number",
+                "field": "score",
+                "op": "lt",
+                "min": 0.5,
+                "max": 9.5,
+            },
+        ],
+    },
+    "by_state": {
+        "model": "tests.PolicyRecord",
+        "description": "Rows in a given state.",
+        "params": [
+            {
+                "name": "state",
+                "type": "choice",
+                "field": "status",
+                "choices": ["failed", "cancelled"],
+            },
+        ],
+    },
+    "amounts": {
+        "model": "tests.PolicyRecord",
+        "description": "Rows by amount.",
+        "params": [
+            {
+                "name": "max_amount",
+                "type": "number",
+                "field": "amount",
+                "op": "lte",
+                "min": 0,
+                "max": 100,
+            },
+        ],
+    },
+}
+
+
+def walk_strings(value):
+    """Yield every dict key and string value in a nested structure."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from walk_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from walk_strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
+class TestListPolicies(TestCase):
+    def listing(self, policies=LISTING_POLICIES, **extra_settings):
+        with override_settings(DB_PURGE_MCP_POLICIES=policies, **extra_settings):
+            return {info["name"]: info for info in describe_policies()}
+
+    def test_unset_or_empty_policies_list_nothing(self):
+        with override_settings(DB_PURGE_MCP_POLICIES={}):
+            self.assertEqual(describe_policies(), [])
+        with override_settings():
+            del settings.DB_PURGE_MCP_POLICIES
+            self.assertEqual(describe_policies(), [])
+
+    def test_describes_each_policy(self):
+        info = self.listing()["stale_failed"]
+
+        self.assertEqual(info["description"], "Failed rows past retention.")
+        self.assertEqual(info["model"], "tests.PolicyRecord")
+        self.assertEqual(info["action"], "delete")
+
+    def test_max_rows_is_the_effective_cap(self):
+        listing = self.listing(DB_PURGE_MCP_MAX_ROWS=200)
+
+        self.assertEqual(listing["stale_failed"]["max_rows"], 50)
+        self.assertEqual(listing["by_state"]["max_rows"], 200)
+        self.assertEqual(self.listing()["by_state"]["max_rows"], 10000)
+
+    def test_age_seconds_param_shows_op_and_bounds(self):
+        (param,) = self.listing()["stale_failed"]["params"]
+
+        self.assertEqual(
+            param,
+            {
+                "name": "older_than_seconds",
+                "type": "age_seconds",
+                "op": "lte",
+                "min": 60,
+                "max": 3600,
+            },
+        )
+
+    def test_number_param_says_whether_it_is_integer_only(self):
+        level, score = self.listing()["low_scores"]["params"]
+        (amount,) = self.listing()["amounts"]["params"]
+
+        self.assertEqual(level["type"], "number")
+        self.assertEqual((level["op"], level["min"], level["max"]), ("lte", 0, 10))
+        self.assertIs(level["integer_only"], True)
+        self.assertEqual((score["op"], score["min"], score["max"]), ("lt", 0.5, 9.5))
+        self.assertIs(score["integer_only"], False)
+        self.assertIs(amount["integer_only"], False)
+
+    def test_choice_param_lists_its_choices(self):
+        (param,) = self.listing()["by_state"]["params"]
+
+        self.assertEqual(
+            param,
+            {"name": "state", "type": "choice", "choices": ["failed", "cancelled"]},
+        )
+
+    def test_int_choices_are_listed_as_ints(self):
+        policies = {
+            "by_level": {
+                "model": "tests.PolicyRecord",
+                "description": "d",
+                "params": [
+                    {
+                        "name": "lvl",
+                        "type": "choice",
+                        "field": "level",
+                        "choices": [1, 2],
+                    }
+                ],
+            }
+        }
+
+        (param,) = self.listing(policies)["by_level"]["params"]
+
+        self.assertEqual(param["choices"], [1, 2])
+
+    def test_never_exposes_select_exclude_or_field_names(self):
+        listing = describe_policies_json(LISTING_POLICIES)
+
+        strings = set(walk_strings(listing))
+        self.assertFalse(strings & FIELD_NAMES, strings & FIELD_NAMES)
+        self.assertNotIn("select", strings)
+        self.assertNotIn("exclude", strings)
+        self.assertNotIn("field", strings)
+        self.assertNotIn("Q(", json.dumps(listing))
+
+    def test_is_read_only(self):
+        self.listing()
+
+        self.assertEqual(PolicyRecord.objects.count(), 0)
+
+    def test_invalid_config_gives_an_opaque_error(self):
+        bad = {"p": {**LISTING_POLICIES["by_state"], "action": "archive"}}
+        with (
+            override_settings(DB_PURGE_MCP_POLICIES=bad),
+            self.assertLogs("dbpurge.policies", "ERROR"),
+            self.assertRaises(PurgePolicyError) as ctx,
+        ):
+            describe_policies()
+
+        self.assertNotIn("archive", str(ctx.exception))
+
+
+def describe_policies_json(policies):
+    """Round-trip the listing through JSON, as the wire would."""
+    with override_settings(DB_PURGE_MCP_POLICIES=policies):
+        return json.loads(json.dumps(describe_policies()))

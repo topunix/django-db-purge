@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 try:
     from typing_extensions import TypedDict
@@ -23,8 +23,11 @@ from django.utils import timezone
 
 from dbpurge.policies import (
     DEFAULT_MAX_ROWS,
+    Param,
     PurgePolicyError,
     PurgeRowSetChangedError,
+    get_max_rows_cap,
+    get_policies,
     is_allowed_model,
 )
 
@@ -88,6 +91,125 @@ class _TokenRecord:
 # execute), tokens must move to external shared storage (Redis, a DB
 # table) since this dict would not be visible across workers.
 _TOKENS: dict[str, _TokenRecord] = {}
+
+
+class AgeSecondsParamInfo(TypedDict):
+    """An age param: an int count of seconds between min and max."""
+
+    name: str
+    type: Literal["age_seconds"]
+    op: Literal["lte", "gte"]
+    min: int
+    max: int
+
+
+class NumberParamInfo(TypedDict):
+    """A number param. integer_only means a float value is rejected."""
+
+    name: str
+    type: Literal["number"]
+    op: Literal["lt", "lte", "gt", "gte"]
+    min: int | float
+    max: int | float
+    integer_only: bool
+
+
+class ChoiceParamInfo(TypedDict):
+    """A choice param: the value must equal one entry of choices exactly."""
+
+    name: str
+    type: Literal["choice"]
+    choices: list[str] | list[int]
+
+
+ParamInfo = AgeSecondsParamInfo | NumberParamInfo | ChoiceParamInfo
+
+
+class PolicyInfo(TypedDict):
+    name: str
+    description: str
+    model: str
+    action: Literal["delete"]
+    max_rows: int
+    params: list[ParamInfo]
+
+
+def _describe_param(param: Param) -> ParamInfo:
+    """Describe a param for the agent: name, type, op and bounds, no field."""
+    if param.type == "choice":
+        choices = param.choices or ()
+        str_choices = [choice for choice in choices if isinstance(choice, str)]
+        int_choices = [choice for choice in choices if isinstance(choice, int)]
+        return {
+            "name": param.name,
+            "type": "choice",
+            "choices": str_choices if len(str_choices) == len(choices) else int_choices,
+        }
+    minimum, maximum = param.minimum, param.maximum
+    if param.type == "age_seconds":
+        if not isinstance(minimum, int) or not isinstance(maximum, int):
+            raise RuntimeError(f"age param {param.name!r} lost its integer bounds")
+        return {
+            "name": param.name,
+            "type": "age_seconds",
+            "op": "gte" if param.op == "gte" else "lte",
+            "min": minimum,
+            "max": maximum,
+        }
+    if param.op is None or minimum is None or maximum is None:
+        raise RuntimeError(f"number param {param.name!r} lost its op or bounds")
+    return {
+        "name": param.name,
+        "type": "number",
+        "op": param.op,
+        "min": minimum,
+        "max": maximum,
+        "integer_only": param.integer_only,
+    }
+
+
+def describe_policies() -> list[PolicyInfo]:
+    """
+    Return every configured policy as the agent is allowed to see it.
+
+    Read-only. Never includes select, exclude, or the model fields a
+    param filters on: the agent learns what a policy is called, what it
+    is for, and what it may tune, but not how it selects rows.
+    """
+    cap = get_max_rows_cap()
+    return [
+        {
+            "name": policy.name,
+            "description": policy.description,
+            "model": policy.model._meta.label,
+            "action": "delete",
+            "max_rows": policy.max_rows if policy.max_rows is not None else cap,
+            "params": [_describe_param(param) for param in policy.params],
+        }
+        for policy in get_policies().values()
+    ]
+
+
+@mcp.tool
+def list_policies() -> list[PolicyInfo]:
+    """
+    List the purge policies an operator has defined.
+
+    Read-only. Call this first: preview_purge and execute_purge take a
+    policy name from this list, never a model, column, or filter. Each
+    entry gives the policy's description, the model it acts on, its
+    action (always "delete"), and max_rows, the most rows one execute
+    may delete. Each param lists the exact values you may supply:
+    age_seconds is an integer between min and max (op says whether it
+    selects rows older than that age, lte, or newer, gte), number is
+    compared with op and must lie between min and max (integer_only
+    means a float such as 5.0 is rejected), and choice must equal one
+    of choices exactly. An empty list means nothing is purgeable.
+    """
+    try:
+        return describe_policies()
+    except PurgePolicyError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def get_purge_candidates() -> dict[str, dict[str, list[str]]]:
