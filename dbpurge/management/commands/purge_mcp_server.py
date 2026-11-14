@@ -5,26 +5,47 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 try:
     from typing_extensions import TypedDict
 except ImportError:
     from typing import TypedDict
 
-from django.apps import apps
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
-from django.db.models import DateField, DateTimeField, Model, QuerySet
+from django.db.models import Model, QuerySet
 from django.utils import timezone
+
+from dbpurge.policies import (
+    Param,
+    ParamValue,
+    Policy,
+    PurgePolicyError,
+    PurgeRowSetChangedError,
+    build_queryset,
+    get_max_rows_cap,
+    get_policies,
+    get_policy,
+    hash_params,
+    load_policies,
+    validate_request,
+)
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fastmcp.exceptions import ToolError
+    from pydantic import StrictFloat, StrictInt, StrictStr
 else:
+    try:
+        from pydantic import StrictFloat, StrictInt, StrictStr
+    except ImportError:
+        StrictInt, StrictFloat, StrictStr = int, float, str
+
     try:
         from fastmcp import FastMCP
         from fastmcp.exceptions import ToolError
@@ -63,16 +84,7 @@ mcp: "FastMCP[Any]" = (
 
 TOKEN_TTL = timedelta(minutes=5)
 PREVIEW_SAMPLE_SIZE = 5
-DEFAULT_MAX_ROWS = 10000
 TOKEN_ERROR_MESSAGE = "invalid or expired confirmation token"
-
-
-class PurgePolicyError(Exception):
-    """Raised when preview/execute parameters fail validation."""
-
-
-class PurgeRowSetChangedError(PurgePolicyError):
-    """Raised when the matched row set differs between preview and execute."""
 
 
 @dataclass(frozen=True)
@@ -92,110 +104,124 @@ class _TokenRecord:
 _TOKENS: dict[str, _TokenRecord] = {}
 
 
-def get_purge_candidates() -> dict[str, dict[str, list[str]]]:
-    """
-    Return every installed model's date and datetime columns.
+class AgeSecondsParamInfo(TypedDict):
+    """An age param: an int count of seconds between min and max."""
 
-    Read-only. Maps app label to model name to the list of field names
-    on that model with type DateField or DateTimeField, since those are
-    the only columns a retention policy can filter on.
+    name: str
+    type: Literal["age_seconds"]
+    op: Literal["lte", "gte"]
+    min: int
+    max: int
+
+
+class NumberParamInfo(TypedDict):
+    """A number param. integer_only means a float value is rejected."""
+
+    name: str
+    type: Literal["number"]
+    op: Literal["lt", "lte", "gt", "gte"]
+    min: int | float
+    max: int | float
+    integer_only: bool
+
+
+class ChoiceParamInfo(TypedDict):
+    """A choice param: the value must equal one entry of choices exactly."""
+
+    name: str
+    type: Literal["choice"]
+    choices: list[str] | list[int]
+
+
+ParamInfo = AgeSecondsParamInfo | NumberParamInfo | ChoiceParamInfo
+
+
+class PolicyInfo(TypedDict):
+    name: str
+    description: str
+    model: str
+    action: Literal["delete"]
+    max_rows: int
+    params: list[ParamInfo]
+
+
+def _describe_param(param: Param) -> ParamInfo:
+    """Describe a param for the agent: name, type, op and bounds, no field."""
+    if param.type == "choice":
+        choices = param.choices or ()
+        str_choices = [choice for choice in choices if isinstance(choice, str)]
+        int_choices = [choice for choice in choices if isinstance(choice, int)]
+        return {
+            "name": param.name,
+            "type": "choice",
+            "choices": str_choices if len(str_choices) == len(choices) else int_choices,
+        }
+    minimum, maximum = param.minimum, param.maximum
+    if param.type == "age_seconds":
+        if not isinstance(minimum, int) or not isinstance(maximum, int):
+            raise RuntimeError(f"age param {param.name!r} lost its integer bounds")
+        return {
+            "name": param.name,
+            "type": "age_seconds",
+            "op": "gte" if param.op == "gte" else "lte",
+            "min": minimum,
+            "max": maximum,
+        }
+    if param.op is None or minimum is None or maximum is None:
+        raise RuntimeError(f"number param {param.name!r} lost its op or bounds")
+    return {
+        "name": param.name,
+        "type": "number",
+        "op": param.op,
+        "min": minimum,
+        "max": maximum,
+        "integer_only": param.integer_only,
+    }
+
+
+def describe_policies() -> list[PolicyInfo]:
     """
-    candidates: dict[str, dict[str, list[str]]] = {}
-    for model in apps.get_models():
-        date_columns = [
-            field.name
-            for field in model._meta.get_fields()
-            if isinstance(field, (DateField, DateTimeField))
-        ]
-        if not date_columns:
-            continue
-        app_label = model._meta.app_label
-        model_name = model._meta.model_name
-        candidates.setdefault(app_label, {})[model_name] = date_columns
-    return candidates
+    Return every configured policy as the agent is allowed to see it.
+
+    Read-only. Never includes select, exclude, or the model fields a
+    param filters on: the agent learns what a policy is called, what it
+    is for, and what it may tune, but not how it selects rows.
+    """
+    policies = get_policies()
+    cap = get_max_rows_cap()
+    return [
+        {
+            "name": policy.name,
+            "description": policy.description,
+            "model": policy.model._meta.label,
+            "action": "delete",
+            "max_rows": policy.max_rows if policy.max_rows is not None else cap,
+            "params": [_describe_param(param) for param in policy.params],
+        }
+        for policy in policies.values()
+    ]
 
 
 @mcp.tool
-def list_purge_candidates() -> dict[str, dict[str, list[str]]]:
+def list_policies() -> list[PolicyInfo]:
     """
-    List installed apps, models, and their date or datetime columns.
+    List the purge policies an operator has defined.
 
-    Read-only. Use the returned (app_name, model_name, time_column)
-    combinations as valid inputs to preview_purge.
-    """
-    return get_purge_candidates()
-
-
-def _is_allowed_model(model: type[Model]) -> bool:
-    """
-    Return whether model is listed in DB_PURGE_MCP_ALLOWED_MODELS.
-
-    Matched case-insensitively. The recommended format is Django's own
-    "app_label.ModelName" label (class-cased, e.g. "tests.SampleRecord"),
-    but list_purge_candidates surfaces model names in lowercase, so
-    either casing is accepted rather than silently rejecting whichever
-    one an operator copies in.
-    """
-    allowed = {
-        name.lower() for name in getattr(settings, "DB_PURGE_MCP_ALLOWED_MODELS", [])
-    }
-    return model._meta.label.lower() in allowed
-
-
-def validate_policy(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
-) -> type[Model]:
-    """
-    Validate a purge policy against live schema and return the model.
-
-    Shared guard for preview_purge and execute_purge. Raises
-    PurgePolicyError if the model does not exist, is not in the
-    DB_PURGE_MCP_ALLOWED_MODELS allowlist (empty by default, meaning
-    nothing is purgeable until configured), time_column is not a real
-    DateField/DateTimeField on it, or retention_seconds is not a
-    positive integer.
+    Read-only. Call this first: preview_purge and execute_purge take a
+    policy name from this list, never a model, column, or filter. Each
+    entry gives the policy's description, the model it acts on, its
+    action (always "delete"), and max_rows, the most rows one execute
+    may delete. Each param lists the exact values you may supply:
+    age_seconds is an integer between min and max (op says whether it
+    selects rows older than that age, lte, or newer, gte), number is
+    compared with op and must lie between min and max (integer_only
+    means a float such as 5.0 is rejected), and choice must equal one
+    of choices exactly. An empty list means nothing is purgeable.
     """
     try:
-        model: type[Model] = apps.get_model(app_label=app_name, model_name=model_name)
-    except LookupError as exc:
-        raise PurgePolicyError(
-            f"Model '{model_name}' in app '{app_name}' not found"
-        ) from exc
-
-    if not _is_allowed_model(model):
-        raise PurgePolicyError(
-            f"Model '{model._meta.label}' is not in DB_PURGE_MCP_ALLOWED_MODELS "
-            "and cannot be purged via MCP"
-        )
-
-    try:
-        field = model._meta.get_field(time_column)
-    except FieldDoesNotExist as exc:
-        raise PurgePolicyError(
-            f"Column '{time_column}' does not exist on model '{model_name}'"
-        ) from exc
-    if not isinstance(field, (DateField, DateTimeField)):
-        raise PurgePolicyError(
-            f"Column '{time_column}' on model '{model_name}' is not a date or "
-            "datetime column"
-        )
-
-    if not isinstance(retention_seconds, int) or isinstance(retention_seconds, bool):
-        raise PurgePolicyError("retention_seconds must be a positive integer")
-    if retention_seconds <= 0:
-        raise PurgePolicyError("retention_seconds must be a positive integer")
-
-    return model
-
-
-def _hash_params(
-    app_name: str, model_name: str, time_column: str, retention_seconds: int
-) -> str:
-    raw = "|".join([app_name, model_name, time_column, str(retention_seconds)])
-    return hashlib.sha256(raw.encode()).hexdigest()
+        return describe_policies()
+    except PurgePolicyError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _evict_expired_tokens() -> None:
@@ -225,25 +251,22 @@ def _fingerprint_fields_for(model: type[Model]) -> tuple[str, ...]:
 
 
 def _row_set_snapshot(
-    queryset: QuerySet,
-    time_column: str,
+    queryset: QuerySet[Any],
     fingerprint_fields: tuple[str, ...],
     limit: int,
 ) -> tuple[tuple[int, ...], str]:
     """
     Return (pk_list, fingerprint) for up to limit rows of queryset.
 
-    Rows are selected in (time_column, pk) order so that, when there
-    are more matches than limit, the slice taken is deterministic.
-    The selected rows are then sorted by pk alone before the pk_list
-    and the fingerprint hash are built: time_column (and any other
-    non-fingerprinted column) can change value between preview and
-    execute without reordering an otherwise-unchanged set of rows, and
-    an ordering artifact must not masquerade as row-set drift.
+    Rows are taken in pk order, so when there are more matches than
+    limit the slice is deterministic, and the pk_list and the
+    fingerprint hash are built in that same order. No other column
+    takes part in the ordering, so a column changing value between
+    preview and execute cannot reorder an unchanged set of rows and
+    masquerade as row-set drift.
     """
     columns = ("pk", *fingerprint_fields)
-    rows = list(queryset.order_by(time_column, "pk").values_list(*columns)[:limit])
-    rows.sort(key=lambda row: row[0])
+    rows = list(queryset.order_by("pk").values_list(*columns)[:limit])
     pk_list = tuple(row[0] for row in rows)
     raw = "|".join(",".join(str(value) for value in row) for row in rows)
     fingerprint = hashlib.sha256(raw.encode()).hexdigest()
@@ -251,20 +274,18 @@ def _row_set_snapshot(
 
 
 def issue_token(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    policy_name: str,
+    validated: dict[str, ParamValue],
     pk_list: tuple[int, ...],
     fingerprint: str,
     preview_row_count: int,
 ) -> tuple[str, datetime]:
-    """Issue a fresh confirmation token bound to the parameters and row set."""
+    """Issue a fresh confirmation token bound to the policy, params and row set."""
     _evict_expired_tokens()
     token = secrets.token_urlsafe(32)
     expires_at = timezone.now() + TOKEN_TTL
     _TOKENS[token] = _TokenRecord(
-        params_hash=_hash_params(app_name, model_name, time_column, retention_seconds),
+        params_hash=hash_params(policy_name, validated),
         expires_at=expires_at,
         pk_list=pk_list,
         fingerprint=fingerprint,
@@ -274,37 +295,27 @@ def issue_token(
 
 
 def token_is_valid(
-    token: str,
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    token: str, policy_name: str, validated: dict[str, ParamValue]
 ) -> bool:
     """
-    Return whether token is currently valid for exactly these parameters.
+    Return whether token is currently valid for exactly this policy and params.
 
-    Collapses an unknown token, an expired token, and a token whose
-    parameters do not match into the same False result. Callers must
-    not surface which of these occurred: a single opaque failure
-    message prevents an agent (or attacker) from using error content
-    to fingerprint token TTLs or probe for near-miss parameter matches.
+    Collapses an unknown token, an expired token, and a token bound to a
+    different policy or different params into the same False result.
+    Callers must not surface which of these occurred: a single opaque
+    failure message prevents an agent (or attacker) from using error
+    content to fingerprint token TTLs or probe for near-miss matches.
     """
     record = _TOKENS.get(token)
     if record is None:
         return False
     if timezone.now() >= record.expires_at:
         return False
-    return record.params_hash == _hash_params(
-        app_name, model_name, time_column, retention_seconds
-    )
+    return record.params_hash == hash_params(policy_name, validated)
 
 
 def _pop_valid_token(
-    token: str,
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    token: str, policy_name: str, validated: dict[str, ParamValue]
 ) -> _TokenRecord | None:
     """
     Atomically consume token, returning its record only if still valid.
@@ -313,18 +324,20 @@ def _pop_valid_token(
     so at most one caller can ever receive a non-None record for a
     given token: this closes the race where two concurrent
     execute_purge calls both observe the token as valid before either
-    consumes it. A caller that then fails for a reason that is not its
-    fault (for example a row-cap breach) must put the record back with
-    _reinstate_token so the token remains usable for a retry.
+    consumes it. A token that does not match (unknown, expired, or
+    bound to a different policy or different params) is gone and is not
+    put back: presenting it for something else burns it. Only a caller
+    that holds a matching record and then fails for a reason that is not
+    its fault (a row-cap breach, drift, a database error) must put the
+    record back with _reinstate_token so the token remains usable for a
+    retry.
     """
     record = _TOKENS.pop(token, None)
     if record is None:
         return None
     if timezone.now() >= record.expires_at:
         return None
-    if record.params_hash != _hash_params(
-        app_name, model_name, time_column, retention_seconds
-    ):
+    if record.params_hash != hash_params(policy_name, validated):
         return None
     return record
 
@@ -334,17 +347,10 @@ def _reinstate_token(token: str, record: _TokenRecord) -> None:
     _TOKENS[token] = record
 
 
-def _expired_queryset(
-    model: type[Model], time_column: str, retention_seconds: int
-) -> tuple[QuerySet, datetime]:
-    """
-    Return (rows older than retention_seconds, the cutoff used).
-
-    Shared by preview_purge_candidates and execute_purge_candidates so
-    the two can never silently disagree about which rows are expired.
-    """
-    cutoff = timezone.now() - timedelta(seconds=retention_seconds)
-    return model.objects.filter(**{f"{time_column}__lte": cutoff}), cutoff
+def effective_max_rows(policy: Policy) -> int:
+    """Return the policy's max_rows if set, else DB_PURGE_MCP_MAX_ROWS."""
+    global_cap = get_max_rows_cap()
+    return policy.max_rows if policy.max_rows is not None else global_cap
 
 
 class PurgePreview(TypedDict):
@@ -354,55 +360,76 @@ class PurgePreview(TypedDict):
     token_expires_at: str
 
 
-def preview_purge_candidates(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
-) -> PurgePreview:
-    """
-    Count and sample rows a purge would delete, without deleting them.
+def _json_value(value: object) -> object:
+    """Render a column value for the agent as plain JSON data."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
 
-    Validates the policy via validate_policy, then filters model rows
-    where time_column is older than retention_seconds. Returns the
-    total match count, up to PREVIEW_SAMPLE_SIZE sample rows (primary
-    key and time_column value only, never the full row), and a fresh
-    confirmation token bound to these exact parameters and to a
-    fingerprint of the matched row set (see _row_set_snapshot), so
-    execute_purge can detect drift instead of trusting the parameters
-    alone.
-    """
-    model = validate_policy(app_name, model_name, time_column, retention_seconds)
-    expired_records, cutoff = _expired_queryset(model, time_column, retention_seconds)
 
-    row_count = expired_records.count()
-    sample_rows = [
-        {"pk": obj.pk, time_column: getattr(obj, time_column).isoformat()}
-        for obj in expired_records.order_by(time_column)[:PREVIEW_SAMPLE_SIZE]
+def _sample_rows(
+    policy: Policy, matched: QuerySet[Any], limit: int
+) -> list[dict[str, object]]:
+    """
+    Return up to limit matched rows: the pk and each param's current value.
+
+    Values are keyed by param name, never by field name, so a preview
+    does not reveal which columns a policy filters on. A policy with no
+    params returns the pk only.
+    """
+    fields = list(dict.fromkeys(param.field for param in policy.params))
+    rows = matched.order_by("pk").values("pk", *fields)[:limit]
+    return [
+        {
+            "pk": row["pk"],
+            **{param.name: _json_value(row[param.field]) for param in policy.params},
+        }
+        for row in rows
     ]
 
-    max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
-    fingerprint_fields = _fingerprint_fields_for(model)
-    pk_list, fingerprint = _row_set_snapshot(
-        expired_records, time_column, fingerprint_fields, max_rows
-    )
 
+def preview_purge_candidates(
+    policy_name: str, params: dict[str, ParamValue] | None = None
+) -> PurgePreview:
+    """
+    Count and sample rows a policy would delete, without deleting them.
+
+    Loads the policy and validates params (validate_request) before any
+    query. Returns the total match count, up to PREVIEW_SAMPLE_SIZE
+    sample rows (primary key and each param's value only, never the
+    full row), and a fresh confirmation token bound to the policy name,
+    the validated params, and a fingerprint of the matched row set (see
+    _row_set_snapshot), so execute_purge can detect drift instead of
+    trusting the parameters alone. A match count above the policy's
+    effective row cap is refused here, so no token is issued for a
+    purge that execute_purge would reject.
+    """
+    policy = get_policy(policy_name)
+    validated = validate_request(policy, params)
+    matched = build_queryset(policy, validated, timezone.now())
+
+    row_count = matched.count()
+    max_rows = effective_max_rows(policy)
+    if row_count > max_rows:
+        raise PurgePolicyError(
+            f"Policy would match {row_count} rows, exceeding its max of {max_rows}. "
+            "Narrow the params and preview again."
+        )
+    sample_rows = _sample_rows(policy, matched, PREVIEW_SAMPLE_SIZE)
+    pk_list, fingerprint = _row_set_snapshot(
+        matched, _fingerprint_fields_for(policy.model), max_rows
+    )
     token, expires_at = issue_token(
-        app_name,
-        model_name,
-        time_column,
-        retention_seconds,
-        pk_list,
-        fingerprint,
-        row_count,
+        policy.name, validated, pk_list, fingerprint, row_count
     )
 
     logger.info(
-        "Previewed purge of %s %s: %s rows older than %s",
-        app_name,
-        model_name,
+        "Previewed purge policy %s params=%s: %s rows matched",
+        policy.name,
+        validated,
         row_count,
-        cutoff,
     )
 
     return {
@@ -415,27 +442,27 @@ def preview_purge_candidates(
 
 @mcp.tool
 def preview_purge(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    policy_name: str,
+    params: dict[str, StrictInt | StrictFloat | StrictStr] | None = None,
 ) -> PurgePreview:
     """
-    Preview which rows a purge would delete, without deleting them.
+    Preview which rows a purge policy would delete, without deleting them.
 
-    Validates app_name, model_name, and time_column against live model
-    introspection, and requires the model to be listed in
-    DB_PURGE_MCP_ALLOWED_MODELS (empty by default, so nothing is
-    purgeable until configured). Returns the matching row count, up to
-    5 sample rows (primary key and time_column value only), a
-    confirmation_token, and token_expires_at. Pass the token and
-    identical parameters to execute_purge before it expires (5 minutes)
-    to actually delete rows. This tool performs no deletion.
+    policy_name must be one returned by list_policies. params must hold
+    exactly the params that policy declares, each within its bounds or
+    from its choices, and may be omitted for a policy that declares
+    none. Nothing else can be supplied: the policy, not the caller,
+    decides the model, the columns and the filter, and a value outside
+    its declared bounds is rejected before the database is touched.
+    Returns the matching row count, up to 5 sample rows (primary key
+    and each param's value, keyed by param name), a confirmation_token,
+    and token_expires_at. A count above the policy's max_rows is
+    refused. Pass the token, the same policy_name and identical params
+    to execute_purge before it expires (5 minutes) to actually delete
+    rows. This tool performs no deletion.
     """
     try:
-        return preview_purge_candidates(
-            app_name, model_name, time_column, retention_seconds
-        )
+        return preview_purge_candidates(policy_name, params)
     except PurgePolicyError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -446,44 +473,48 @@ class PurgeResult(TypedDict):
 
 
 def execute_purge_candidates(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    policy_name: str,
     confirmation_token: str,
+    params: dict[str, ParamValue] | None = None,
 ) -> PurgeResult:
     """
     Delete rows matched by a prior, still-valid preview_purge call.
 
-    Requires confirmation_token to be valid for these exact parameters.
-    The token is popped out of the store before it is checked, so at
-    most one caller can ever consume a given token even if two
-    execute_purge calls race. Any mismatch, expiry, or unknown token
-    raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the same message
-    regardless of which of those it was. The token is consumed only
-    once the delete actually succeeds: if the call fails for any
-    reason first, including a row-cap breach or a row-set fingerprint
-    mismatch (see below), the token is put back so a retry with the
-    same token can still succeed within its TTL.
+    Loads the policy and validates params exactly as preview does, then
+    requires confirmation_token to be valid for this policy name and
+    these params. The token is popped out of the store before it is
+    checked, so at most one caller can ever consume a given token even
+    if two execute_purge calls race. Any mismatch, expiry, or unknown
+    token raises PurgePolicyError(TOKEN_ERROR_MESSAGE), the same
+    message regardless of which of those it was. A token presented with
+    a different policy or different params is popped and not put back,
+    so that attempt burns it: the matching execute that follows is
+    rejected too and needs a fresh preview. (A call rejected earlier, by
+    an unknown policy or invalid params, never reaches the token and
+    leaves it alone.) Once the token matches, it is consumed only when
+    the delete actually succeeds: if the call then fails, for a row-cap
+    breach, a row-set fingerprint mismatch (see below) or a database
+    error, the token is put back so a retry with the same token can
+    still succeed within its TTL.
 
-    DB_PURGE_MCP_MAX_ROWS bounds the number of *matching* rows (the
-    same count preview_purge reports and what is re-checked here right
-    before deleting), not cascade fan-out: ON DELETE CASCADE relations
-    can remove additional related rows this cap does not account for.
-    The deleted_count returned and logged is delete()'s own return
-    value, which does include those cascades.
+    The policy's max_rows (else DB_PURGE_MCP_MAX_ROWS) bounds the number
+    of *matching* rows, the same count preview_purge reports, re-checked
+    here right before deleting. It does not bound cascade fan-out: ON
+    DELETE CASCADE relations can remove additional related rows. The
+    deleted_count returned and logged is delete()'s own return value,
+    which does include those cascades.
 
     Deletion targets the exact primary keys preview_purge captured,
-    not a re-run of the retention filter: a row that starts matching
-    the filter after preview (a phantom insert) is structurally
-    excluded, since it was never in that PK list. Before deleting,
-    this re-runs the filter and recomputes the row-set fingerprint
-    (PKs, plus any DB_PURGE_MCP_FINGERPRINT_FIELDS columns configured
-    for the model) to detect drift, PKs that left or joined the match
-    set, or (only with fingerprint_fields configured) in-place
-    mutation of a still-matching row. A fingerprint mismatch raises
-    PurgeRowSetChangedError naming the previewed and current row
-    counts, and never retries or reissues a token automatically:
+    not a re-run of the policy's filter: a row that starts matching
+    after preview (a phantom insert) is structurally excluded, since
+    it was never in that PK list. Before deleting, this re-runs the
+    filter, select and exclude included, and recomputes the row-set
+    fingerprint (PKs, plus any DB_PURGE_MCP_FINGERPRINT_FIELDS columns
+    configured for the model) to detect drift: PKs that left or joined
+    the match set, or (only with fingerprint_fields configured)
+    in-place mutation of a still-matching row. A fingerprint mismatch
+    raises PurgeRowSetChangedError naming the previewed and current
+    row counts, and never retries or reissues a token automatically:
     the caller must run preview_purge again. Where the database
     backend supports SELECT ... FOR UPDATE (connection.features.
     has_select_for_update), the re-check locks the candidate rows for
@@ -492,39 +523,36 @@ def execute_purge_candidates(
     already makes phantom inserts harmless and the lock is a nicety on
     top of that, not the safety mechanism.
     """
-    model = validate_policy(app_name, model_name, time_column, retention_seconds)
+    policy = get_policy(policy_name)
+    validated = validate_request(policy, params)
 
-    record = _pop_valid_token(
-        confirmation_token, app_name, model_name, time_column, retention_seconds
-    )
+    record = _pop_valid_token(confirmation_token, policy.name, validated)
     if record is None:
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
 
-    max_rows = getattr(settings, "DB_PURGE_MCP_MAX_ROWS", DEFAULT_MAX_ROWS)
-    fingerprint_fields = _fingerprint_fields_for(model)
+    max_rows = effective_max_rows(policy)
+    fingerprint_fields = _fingerprint_fields_for(policy.model)
 
     start_time = time.monotonic()
     try:
         with transaction.atomic():
-            expired_records, cutoff = _expired_queryset(
-                model, time_column, retention_seconds
-            )
+            matched = build_queryset(policy, validated, timezone.now())
             if connection.features.has_select_for_update:
-                expired_records = expired_records.select_for_update()
+                matched = matched.select_for_update()
 
             # count() and the fingerprint re-check below are separate
             # queries from the eventual delete, so the row cap and the
             # fingerprint are both coarse safety nets rather than exact
             # guarantees on backends without row locking.
-            row_count = expired_records.count()
+            row_count = matched.count()
             if row_count > max_rows:
                 raise PurgePolicyError(
-                    f"Purge would match {row_count} rows, exceeding the configured "
-                    f"max of {max_rows} (DB_PURGE_MCP_MAX_ROWS). Refusing to execute."
+                    f"Purge would match {row_count} rows, exceeding the max of "
+                    f"{max_rows} for this policy. Refusing to execute."
                 )
 
             _, current_fingerprint = _row_set_snapshot(
-                expired_records, time_column, fingerprint_fields, max_rows
+                matched, fingerprint_fields, max_rows
             )
             if current_fingerprint != record.fingerprint:
                 raise PurgeRowSetChangedError(
@@ -533,7 +561,7 @@ def execute_purge_candidates(
                     "Run preview_purge again and execute with its new token."
                 )
 
-            deleted_total, deleted_by_model = model.objects.filter(
+            deleted_total, deleted_by_model = policy.model._default_manager.filter(
                 pk__in=record.pk_list
             ).delete()
     except Exception:
@@ -542,18 +570,14 @@ def execute_purge_candidates(
     took = time.monotonic() - start_time
 
     logger.info(
-        "Executed purge of %s.%s.%s (retention=%ss): deleted %s rows older than %s "
-        "(took %.3fs)",
-        app_name,
-        model_name,
-        time_column,
-        retention_seconds,
+        "Executed purge policy %s params=%s: deleted %s rows (took %.3fs)",
+        policy.name,
+        validated,
         deleted_total,
-        cutoff,
         took,
     )
     logger.debug(
-        "Purge delete breakdown for %s %s: %s", app_name, model_name, deleted_by_model
+        "Purge delete breakdown for policy %s: %s", policy.name, deleted_by_model
     )
 
     return {"deleted_count": deleted_total, "duration_seconds": took}
@@ -561,34 +585,36 @@ def execute_purge_candidates(
 
 @mcp.tool
 def execute_purge(
-    app_name: str,
-    model_name: str,
-    time_column: str,
-    retention_seconds: int,
+    policy_name: str,
     confirmation_token: str,
+    params: dict[str, StrictInt | StrictFloat | StrictStr] | None = None,
 ) -> PurgeResult:
     """
     Delete rows matched by a prior, still-valid preview_purge call.
 
-    Requires the model to be listed in DB_PURGE_MCP_ALLOWED_MODELS
-    (empty by default, so nothing is purgeable until configured), the
-    same check preview_purge already applied, re-verified here. Also
-    requires an exact parameter match against a preview_purge call,
-    using the confirmation_token it returned, within that token's 5
-    minute lifetime. An unknown token, an expired token, and a token
-    whose parameters no longer match all fail with the identical
-    "invalid or expired confirmation token" message, by design:
-    callers cannot distinguish why a token was rejected. Tokens are
-    single-use: only consumed once this call's delete actually
-    succeeds. If the call fails for any other reason (a row-cap
-    breach, or a row-set fingerprint mismatch), the token is restored
-    so a retry with the same token can still succeed within its TTL.
+    Pass the same policy_name and identical params that preview_purge
+    received, with the confirmation_token it returned, within that
+    token's 5 minute lifetime. The policy is loaded and params are
+    validated again, and the policy's model must still be in
+    DB_PURGE_MCP_ALLOWED_MODELS (empty by default, so nothing is
+    purgeable until configured). An unknown token, an expired token,
+    and a token issued for a different policy or different params all
+    fail with the identical "invalid or expired confirmation token"
+    message, by design: callers cannot distinguish why a token was
+    rejected. Tokens are single-use. Presenting a token with a
+    different policy_name or different params uses it up: that call
+    fails and the token is gone, so the correct call afterwards is
+    rejected too and you must run preview_purge again. A token that
+    matches is consumed only once this call's delete actually succeeds.
+    If the call then fails (a row-cap breach, a row-set fingerprint
+    mismatch, or a database error), the token is restored so a retry
+    with the same token can still succeed within its TTL.
 
-    DB_PURGE_MCP_MAX_ROWS is re-checked against the live matching row
-    count at execute time, even if preview_purge saw a count under the
-    cap. It bounds matching rows, not cascade fan-out from related
-    models; the deleted_count returned here is the real total,
-    cascades included.
+    The policy's max_rows (else DB_PURGE_MCP_MAX_ROWS) is re-checked
+    against the live matching row count at execute time, even if
+    preview_purge saw a count under the cap. It bounds matching rows,
+    not cascade fan-out from related models; the deleted_count returned
+    here is the real total, cascades included.
 
     The token also binds a fingerprint of the exact row set
     preview_purge matched (their primary keys, plus any
@@ -602,9 +628,7 @@ def execute_purge(
     counts, rather than deleting a set the caller never saw.
     """
     try:
-        return execute_purge_candidates(
-            app_name, model_name, time_column, retention_seconds, confirmation_token
-        )
+        return execute_purge_candidates(policy_name, confirmation_token, params)
     except PurgePolicyError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -634,6 +658,15 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         if FastMCP is None:
             raise CommandError(MISSING_FASTMCP_ERROR)
+        # Fail closed at startup: an invalid policy stops the command here, so
+        # the server never starts with a config it would reject on every call.
+        try:
+            policies = load_policies()
+        except ImproperlyConfigured as exc:
+            raise CommandError(f"Invalid DB_PURGE_MCP_POLICIES: {exc}") from exc
         configure_stderr_logging()
-        logger.info("Starting django-db-purge MCP server over stdio")
+        logger.info(
+            "Starting django-db-purge MCP server over stdio with %s policies",
+            len(policies),
+        )
         mcp.run(transport="stdio")
