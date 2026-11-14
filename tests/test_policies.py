@@ -106,6 +106,12 @@ class TestLoadPolicies(PolicyConfigTestCase):
                 self.load({name: policy()})
         self.load({"a" * 64: policy()})
 
+    def test_a_trailing_newline_is_refused_in_names(self):
+        # "$" alone matches before a trailing newline, so fullmatch is needed.
+        with self.assertRaises(ImproperlyConfigured):
+            self.load({"ok\n": policy()})
+        self.assertInvalid(policy(params=[{**AGE, "name": "ok\n"}]))
+
     def test_unknown_top_level_key_rejected(self):
         self.assertInvalid(policy(unexpected=1))
 

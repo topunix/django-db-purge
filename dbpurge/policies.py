@@ -169,7 +169,7 @@ def _load_param(policy_name: str, model: type[Model], raw: object) -> Param:
         raise _bad(policy_name, f"param is missing keys: {sorted(missing)}")
 
     name = raw["name"]
-    if not isinstance(name, str) or not POLICY_NAME_RE.match(name):
+    if not isinstance(name, str) or not POLICY_NAME_RE.fullmatch(name):
         raise _bad(policy_name, f"param name must match {POLICY_NAME_RE.pattern}")
     field_name = raw["field"]
     if not isinstance(field_name, str) or "__" in field_name:
@@ -293,7 +293,7 @@ def _select_queryset(
 
 
 def _load_policy(name: object, raw: object) -> Policy:
-    if not isinstance(name, str) or not POLICY_NAME_RE.match(name):
+    if not isinstance(name, str) or not POLICY_NAME_RE.fullmatch(name):
         raise ImproperlyConfigured(
             f"DB_PURGE_MCP_POLICIES: policy names must match {POLICY_NAME_RE.pattern}"
         )
