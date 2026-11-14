@@ -827,12 +827,18 @@ class TestPolicyMaxRows(PolicyTestCase):
     def test_the_global_cap_applies_to_a_policy_without_its_own(self):
         make_record(status="failed")
         make_record(status="failed")
+        # "capped" sets a max_rows above 1, which would fail the load, so
+        # only the policy without its own cap is configured here.
+        only = {"failed_rows": POLICIES_BY_NAME["failed_rows"]}
 
         with (
-            override_settings(DB_PURGE_MCP_MAX_ROWS=1),
-            self.assertRaises(PurgePolicyError),
+            override_settings(DB_PURGE_MCP_POLICIES=only, DB_PURGE_MCP_MAX_ROWS=1),
+            self.assertRaises(PurgePolicyError) as ctx,
         ):
             self.preview("failed_rows")
+
+        self.assertIn("match 2 rows", str(ctx.exception))
+        self.assertIn("max of 1", str(ctx.exception))
 
 
 class TestToManyJoin(PolicyTestCase):
