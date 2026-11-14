@@ -410,7 +410,10 @@ param is integer-only, but no field names.
 
 **The preview, single-use token, 5 minute TTL, atomic pop, delete by
 stored primary key list, fingerprint, and drift rejection from ADR 1 to
-3 are unchanged.** The snapshot now takes its slice in primary key order.
+3 are unchanged.** The snapshot now takes its slice in primary key order,
+not oldest first as in ADR 3. Preview refuses a count above the cap, and
+execute refuses one before it consults the fingerprint, so the slice never
+truncates a set that is acted on and the change is not observable.
 
 ### Rejected
 
@@ -466,10 +469,13 @@ column should not declare a param on it.
 
 **Tokens are not bound to the policy definition.** The token binds the
 policy name and the params, not the `select`, `exclude`, or `max_rows` in
-force at preview. If the operator edits a policy between preview and
-execute and restarts the server, the old token still matches by name. The
-fingerprint re-check then runs against the new definition, so a changed
-filter will usually surface as drift, but it is not guaranteed.
+force at preview. Today that cannot bite: settings are read once per
+process and tokens live in that process, so a policy edit always arrives
+with an empty token store and every token issued under the old definition
+is gone. The gap opens only if settings become reloadable or tokens move
+to shared storage (see ADR 2). A token could then outlive the definition
+it was issued under, and the fingerprint re-check, which runs against the
+new definition, would be the only thing to notice a changed filter.
 
 **Settings are frozen at startup.** Django reads settings once, so a
 change to a policy or to the allowlist needs a restart. Per-call loading
@@ -485,8 +491,3 @@ is part of the same in-process store described in ADR 2.
 **Equal numbers of different type are different tokens.** `5` and `5.0`
 bind differently, so a client that previews with one and executes with the
 other is rejected and burned. That fails safe.
-
-**The cap slice only affects the stored fingerprint.** Because an
-over-cap execute is refused before the fingerprint is consulted, taking
-the slice in primary key order, and not oldest first as in ADR 3, changes
-only what a stored fingerprint covers.

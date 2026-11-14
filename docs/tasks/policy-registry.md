@@ -242,15 +242,6 @@ conflicts with text above, the ruling wins.
   database errors) reinstate it, and a request rejected before the token check (an
   unknown policy or invalid params) leaves it alone. The execute docstrings say so.
 
-### release-2-0 notes
-Behavior changes the release-2-0 migration note must cover, beyond the new signatures:
-- A preview whose match count exceeds the effective row cap is refused and issues no
-  token. In 1.x a preview reported any count and only execute enforced the cap.
-- `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, so a value of 0 is now invalid.
-  In 1.x a value of 0 blocked every purge.
-- A token presented with a different policy or different params is burned: it is not
-  reinstated, so the correct execute afterwards is rejected and needs a fresh preview.
-
 ### Additional requirements
 - Non-finite numbers (NaN, Infinity, -Infinity) are rejected in requests and in config
   bounds. For `age_seconds`, max must be small enough that now minus max is a

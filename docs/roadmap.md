@@ -73,6 +73,11 @@ implemented.
 5. **release-2-0**: version bump to 2.0.0, migration note showing the old `days` call
    expressed as a policy, README structural reorganization, PyPI publish through the
    existing `publish.yml` release workflow.
+   The migration note must also cover these behavior changes from 1.x:
+   - A preview whose match count exceeds the effective row cap is refused and issues
+     no token. In 1.x a preview reported any count and only execute enforced the cap.
+   - `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, so a value of 0 is now
+     invalid. In 1.x a value of 0 blocked every purge.
    Depends on: every item above.
    Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
    match `python_requires`.

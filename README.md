@@ -65,7 +65,7 @@ pip install django-db-purge
 
 ## MCP server
 
-django-db-purge also ships an MCP server that exposes operator-defined purge policies to an AI agent, with guardrails so an agent can never delete rows without a human-verifiable preview step. It runs inside Django as a management command and speaks the MCP protocol over stdio, so it works with Claude Desktop, the MCP Inspector, or any other MCP-capable host. The server makes no LLM API calls of its own: the host runs the model, and this process only exposes deterministic, schema-validated tools.
+django-db-purge also ships an MCP server that exposes operator-defined purge policies to an AI agent, with guardrails so an agent can never delete rows without a prior preview of exactly those rows. It runs inside Django as a management command and speaks the MCP protocol over stdio, so it works with Claude Desktop, the MCP Inspector, or any other MCP-capable host. The server makes no LLM API calls of its own: the host runs the model, and this process only exposes deterministic, schema-validated tools.
 
 ### Installation
 
