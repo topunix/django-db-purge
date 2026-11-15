@@ -9,7 +9,8 @@ You have no other context, on purpose.
 
 Steps:
 - Read the spec, CLAUDE.md, and DESIGN.md.
-- Run git diff origin/master...HEAD and read every changed file in full.
+- Run git fetch origin master, then git diff origin/master...HEAD, and read
+  every changed file in full.
 - Run the four check commands from CLAUDE.md yourself.
 - For each acceptance criterion, state PASS or FAIL with evidence.
 - Look for: safety model regressions (preview, token, execute handshake, row

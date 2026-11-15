@@ -11,15 +11,20 @@ master. Process every item even if an earlier one fails.
 Resolve queue numbers to slugs against the current file and use slugs from
 then on.
 
+Before the first item, run git fetch origin master. Throughout this
+command, "master" means origin/master as just fetched, never the local
+master ref, which can be stale.
+
 For each item:
 
 1. Gate. Skip the item and record why if any of these hold:
-   - Its Verify marker is already true on master (roadmap is stale).
+   - Its Verify marker is already true on origin/master (roadmap is stale).
    - It has a "Resolve before starting" line, or any wording that needs a
      maintainer decision or a chat revision before implementation.
-   - It depends on an item that is not yet on master.
+   - It depends on an item that is not yet on origin/master.
 
-2. Branch. Name it after the slug and base it on master.
+2. Branch. Run git fetch origin master, then create the branch named
+   after the slug from origin/master.
 
 3. Spec. Write docs/tasks/<slug>.md from the roadmap entry and the actual
    code, using the section layout of existing specs: Goal, Scope (In, Out),
