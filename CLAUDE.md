@@ -107,6 +107,9 @@ operations without a prior preview of exactly those rows.
 
 - Before any multi-file change, state a 2 to 3 sentence execution plan
   and wait for confirmation.
+- Exception: during a /roadmap run the committed task spec is the plan. Do
+  not wait for confirmation. Push the branch and open the PR as the command
+  directs. All other rules in this file still apply.
 - When showing proposed edits in discussion, show only new or changed
   functions with comments marking unchanged code.
 - No co-author or attribution trailers in commit messages.
@@ -119,3 +122,6 @@ operations without a prior preview of exactly those rows.
   do not apply them.
 - Task specs live in docs/tasks/<slug>.md and are deleted after the work
   lands.
+- /roadmap <items> implements items unattended, one PR per item, each
+  branched from master. Items with unresolved owner decisions or unmerged
+  dependencies are skipped, not guessed.
