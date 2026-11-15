@@ -491,3 +491,23 @@ is part of the same in-process store described in ADR 2.
 **Equal numbers of different type are different tokens.** `5` and `5.0`
 bind differently, so a client that previews with one and executes with the
 other is rejected and burned. That fails safe.
+
+---
+
+## Client identity in the call log
+
+Every tool call emits one `dbpurge.mcp` log record. Two of its fields,
+`client_name` and `client_version`, come from the `clientInfo` the MCP
+client sent in its `initialize` request, read from the active FastMCP
+request context. They identify the client application, for example Claude
+Desktop or MCP Inspector.
+
+They are self-reported and unauthenticated: any client can send any
+string, so treat them as a debugging hint and never as an access control
+input. They also do not identify the model that drove the call. A client
+application can front many models, and the protocol does not carry the
+model's identity, so the record has no field that claims to hold it.
+Client identity is not model identity.
+
+Both fields are None when there is no active request context (a direct
+Python call) or fastmcp is absent. Reading them never raises.

@@ -260,6 +260,10 @@ A token binds the exact set of rows the preview matched, not just the parameters
 - **`DB_PURGE_MCP_FINGERPRINT_FIELDS`**
   Optional, per model, opt-in. Maps a model label to the extra columns to include in that model's row-set fingerprint, e.g. `{"tests.SampleRecord": ["label"]}`. Model labels are matched case-insensitively, like `DB_PURGE_MCP_ALLOWED_MODELS`. Defaults to an empty dict, meaning fingerprints cover primary keys only, so rows modified in place between preview and execute are still deleted as long as they still match the filter. Name columns here to have `execute_purge` reject those modifications as well. There is no assumption that a model has an `updated_at` or version column: configure whichever columns matter to you.
 
+### Call log
+
+Each tool call writes exactly one record to the `dbpurge.mcp` logger, so an operator can route it to an audit sink. Fields are attributes on the `LogRecord`, not parsed from the message: `policy_name`, `params`, `row_count`, `outcome`, `client_name`, `client_version`, and, on `consumed`, `duration_seconds`. `outcome` is `listed`, `issued` (preview issued a token), `consumed` (execute deleted), `rejected` (a policy, params, token or row cap refusal, logged at WARNING), or `error` (an unexpected exception, logged at ERROR). `client_name` and `client_version` are what the client self-reports at connection time; they do not identify the model.
+
 ### Running the server
 
 Inside your project's virtualenv, with `dbpurge` in `INSTALLED_APPS`:
