@@ -235,6 +235,22 @@ def _client_identity() -> tuple[str | None, str | None]:
         return None, None
 
 
+def _params_for_log(
+    policy_name: str, params: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """
+    Return params as they should appear in the call record.
+
+    The validated params when they validate for this policy (so omitted
+    params read as {}), else a copy of the params as received. Never
+    raises, and runs no database query.
+    """
+    try:
+        return dict(validate_request(get_policy(policy_name), params))
+    except Exception:  # Best effort: logging must never break a tool call.
+        return dict(params) if isinstance(params, dict) else params
+
+
 def _log_call(
     tool: str,
     outcome: str,
@@ -540,19 +556,24 @@ def preview_purge(
             "preview_purge",
             "rejected",
             policy_name=policy_name,
-            params=params,
+            params=_params_for_log(policy_name, params),
             row_count=exc.row_count if isinstance(exc, PurgeRowCapError) else None,
             reason=str(exc),
         )
         raise ToolError(str(exc)) from exc
     except Exception:
-        _log_call("preview_purge", "error", policy_name=policy_name, params=params)
+        _log_call(
+            "preview_purge",
+            "error",
+            policy_name=policy_name,
+            params=_params_for_log(policy_name, params),
+        )
         raise
     _log_call(
         "preview_purge",
         "issued",
         policy_name=policy_name,
-        params=params if params is not None else {},
+        params=dict(params) if params is not None else {},
         row_count=preview["row_count"],
     )
     return preview
@@ -718,18 +739,23 @@ def execute_purge(
             "execute_purge",
             "rejected",
             policy_name=policy_name,
-            params=params,
+            params=_params_for_log(policy_name, params),
             reason=str(exc),
         )
         raise ToolError(str(exc)) from exc
     except Exception:
-        _log_call("execute_purge", "error", policy_name=policy_name, params=params)
+        _log_call(
+            "execute_purge",
+            "error",
+            policy_name=policy_name,
+            params=_params_for_log(policy_name, params),
+        )
         raise
     _log_call(
         "execute_purge",
         "consumed",
         policy_name=policy_name,
-        params=params if params is not None else {},
+        params=dict(params) if params is not None else {},
         row_count=result["deleted_count"],
         duration_seconds=result["duration_seconds"],
     )

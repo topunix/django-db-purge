@@ -1371,14 +1371,33 @@ class TestStructuredCallLog(PolicyTestCase):
             self.assertLogs("dbpurge.mcp", "WARNING") as logs,
             self.assertRaises(ToolError) as ctx,
         ):
-            purge_mcp_server.execute_purge("failed_rows", "not-a-real-token")
+            purge_mcp_server.execute_purge(
+                "old_rows", "not-a-real-token", {"older_than_seconds": 3600}
+            )
 
         record = self.one_record(logs)
         self.assertEqual(record.outcome, "rejected")
-        self.assertEqual(record.policy_name, "failed_rows")
+        self.assertEqual(record.policy_name, "old_rows")
+        self.assertEqual(record.params, {"older_than_seconds": 3600})
         self.assertIsNone(record.row_count)
         self.assertEqual(record.levelname, "WARNING")
         self.assertEqual(str(ctx.exception), TOKEN_ERROR_MESSAGE)
+
+    def test_omitted_params_are_logged_as_empty_on_a_token_rejection(self):
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            purge_mcp_server.execute_purge("failed_rows", "not-a-real-token")
+
+        self.assertEqual(self.one_record(logs).params, {})
+
+    def test_the_record_holds_a_copy_of_params(self):
+        params = {"older_than_seconds": 3600}
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            self.preview_tool("old_rows", params)
+
+        self.assertIsNot(self.one_record(logs).params, params)
 
     def test_row_cap_refusal_logs_rejected_with_the_matched_count(self):
         for _ in range(3):
