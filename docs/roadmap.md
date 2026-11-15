@@ -13,7 +13,7 @@ State sources:
 Items reference each other by name, never by number. Only the maintainer reorders or
 adds items.
 Task specs live in `docs/tasks/`, versioned, deleted after the work lands on `master`.
-Shipped items are deleted in the PR that ships them.
+The maintainer deletes shipped items after the PR merges.
 
 ## Sequenced queue
 
@@ -28,8 +28,8 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    select_for_update branch in execute is exercised.
    Decided: a GitHub Actions Postgres service container, on one Python version. SQLite
    jobs stay.
-   Resolve before starting (owner decision):
-   - Postgres major version, matched to the RDS version the maintainer will deploy.
+   Decided: PostgreSQL 17. The CI service image is postgres:17. Bump it when the
+   deployed RDS major version changes.
    Verify: .github/workflows/ci.yml on master has a job with a postgres service that runs
    runtests.py.
 
@@ -48,7 +48,9 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    MCP surface, with a published results table.
    Decided: categories are token lifecycle, parameter binding, row-set fingerprinting,
    allowlist and scope escape, row cap enforcement, and protocol/injection. The
-   registry is revised in chat against the policy surface before implementation.
+   first commit of the task is the registry alone, at tests/adversarial/registry.py,
+   with at least three cases per category. The maintainer revises it in PR review, not
+   in chat.
    Decided: tests are hermetic and deterministic, live in `tests/adversarial/` under
    their own pytest marker, and emit JUnit and JSON. The markdown results table is
    generated, not hand-written. A CI job runs the suite.
@@ -61,11 +63,21 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Verify: `evals/README.md` on `master` contains a threat model and a results table.
 
 4. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
+   Decided: the [otel] extra installs opentelemetry-api only. The package configures no
+   SDK and no exporter. The host application does that.
+   Decided: one span per tool call, named dbpurge.list_policies,
+   dbpurge.preview_purge, and dbpurge.execute_purge. Attributes are policy name,
+   outcome, and row count. Param values are not recorded on spans.
+   Decided: with the extra not installed, the server behaves exactly as it does today.
+   A test asserts this.
+   Decided: tests use the in-memory span exporter from opentelemetry-sdk as a test-only
+   dependency.
    Verify: an `[otel]` extra exists in `setup.py` on `master`.
 
 5. **release-2-0**: version bump to 2.0.0, migration note showing the old `days` call
-   expressed as a policy, README structural reorganization, PyPI publish through the
-   existing `publish.yml` release workflow.
+   expressed as a policy, the maintainer publishes to PyPI through the existing
+   `publish.yml` release workflow after the PR merges.
+   Decided: the task never publishes, tags, or creates a GitHub release.
    The migration note must also cover these behavior changes from 1.x:
    - A preview whose match count exceeds the effective row cap is refused and issues
      no token. In 1.x a preview reported any count and only execute enforced the cap.
@@ -74,7 +86,8 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Depends on: postgres-ci, structured-logging, adversarial-harness, otel-spans.
    Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
    match `python_requires`.
-   Verify: PyPI `info.version` is 2.0.0 and the README has a migration section.
+   Verify: `setup.py` on `master` has version 2.0.0 and the README has a migration
+   section.
 
 6. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
    of one count() and one queryset.delete().
@@ -83,9 +96,15 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Decided: the MCP path is unchanged. It is already bounded by the row cap.
    Also: the completion log line passes the queryset itself as a format argument, which
    re-runs the query. Log the count instead.
-   Resolve before starting (owner decisions):
-   - Setting name and default batch size.
-   - Whether a batch failure stops the run or continues with the next batch.
+   Decided: the setting is DB_PURGE_BATCH_SIZE, a positive integer, default 1000. Any
+   other value raises CommandError before any query.
+   Decided: a batch failure stops the run with CommandError and a non-zero exit.
+   Batches already deleted stay deleted. The error reports how many rows were deleted
+   before the failure.
+   Decided: the measurement is a script that seeds 500,000 expired rows and times the
+   command before and after the change, on PostgreSQL. The numbers and the backend go
+   in the PR description. The script is committed under benchmarks/.
+   Depends on: postgres-ci.
    Verify: a test on master asserts db_purge deletes in more than one batch when matches
    exceed the batch size.
 
