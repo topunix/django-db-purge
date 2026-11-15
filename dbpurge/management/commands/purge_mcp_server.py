@@ -235,20 +235,23 @@ def _client_identity() -> tuple[str | None, str | None]:
         return None, None
 
 
-def _params_for_log(
-    policy_name: str, params: dict[str, Any] | None
-) -> dict[str, Any] | None:
+def _load_request(
+    policy_name: str, params: dict[str, ParamValue] | None
+) -> tuple[Policy, dict[str, ParamValue]]:
     """
-    Return params as they should appear in the call record.
+    Load the policy and validate params: the guard both tools share.
 
-    The validated params when they validate for this policy (so omitted
-    params read as {}), else a copy of the params as received. Never
-    raises, and runs no database query.
+    Runs before any database query. The tool layer calls this once per
+    call and hands the result to the body, so what is logged is exactly
+    what was evaluated.
     """
-    try:
-        return dict(validate_request(get_policy(policy_name), params))
-    except Exception:  # Best effort: logging must never break a tool call.
-        return dict(params) if isinstance(params, dict) else params
+    policy = get_policy(policy_name)
+    return policy, validate_request(policy, params)
+
+
+def _received(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Copy params as received for a record, keeping None for omitted."""
+    return dict(params) if params is not None else None
 
 
 def _log_call(
@@ -500,8 +503,12 @@ def preview_purge_candidates(
     effective row cap is refused here, so no token is issued for a
     purge that execute_purge would reject.
     """
-    policy = get_policy(policy_name)
-    validated = validate_request(policy, params)
+    policy, validated = _load_request(policy_name, params)
+    return _preview_loaded(policy, validated)
+
+
+def _preview_loaded(policy: Policy, validated: dict[str, ParamValue]) -> PurgePreview:
+    """Preview body: count, sample and token for an already validated request."""
     matched = build_queryset(policy, validated, timezone.now())
 
     row_count = matched.count()
@@ -550,30 +557,43 @@ def preview_purge(
     rows. This tool performs no deletion.
     """
     try:
-        preview = preview_purge_candidates(policy_name, params)
+        policy, validated = _load_request(policy_name, params)
     except PurgePolicyError as exc:
         _log_call(
             "preview_purge",
             "rejected",
             policy_name=policy_name,
-            params=_params_for_log(policy_name, params),
+            params=_received(params),
+            reason=str(exc),
+        )
+        raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "preview_purge", "error", policy_name=policy_name, params=_received(params)
+        )
+        raise
+    try:
+        preview = _preview_loaded(policy, validated)
+    except PurgePolicyError as exc:
+        _log_call(
+            "preview_purge",
+            "rejected",
+            policy_name=policy_name,
+            params=dict(validated),
             row_count=exc.row_count if isinstance(exc, PurgeRowCapError) else None,
             reason=str(exc),
         )
         raise ToolError(str(exc)) from exc
     except Exception:
         _log_call(
-            "preview_purge",
-            "error",
-            policy_name=policy_name,
-            params=_params_for_log(policy_name, params),
+            "preview_purge", "error", policy_name=policy_name, params=dict(validated)
         )
         raise
     _log_call(
         "preview_purge",
         "issued",
         policy_name=policy_name,
-        params=dict(params) if params is not None else {},
+        params=dict(validated),
         row_count=preview["row_count"],
     )
     return preview
@@ -635,9 +655,14 @@ def execute_purge_candidates(
     already makes phantom inserts harmless and the lock is a nicety on
     top of that, not the safety mechanism.
     """
-    policy = get_policy(policy_name)
-    validated = validate_request(policy, params)
+    policy, validated = _load_request(policy_name, params)
+    return _execute_loaded(policy, validated, confirmation_token)
 
+
+def _execute_loaded(
+    policy: Policy, validated: dict[str, ParamValue], confirmation_token: str
+) -> PurgeResult:
+    """Execute body: consume the token and delete for a validated request."""
     record = _pop_valid_token(confirmation_token, policy.name, validated)
     if record is None:
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
@@ -733,29 +758,42 @@ def execute_purge(
     counts, rather than deleting a set the caller never saw.
     """
     try:
-        result = execute_purge_candidates(policy_name, confirmation_token, params)
+        policy, validated = _load_request(policy_name, params)
     except PurgePolicyError as exc:
         _log_call(
             "execute_purge",
             "rejected",
             policy_name=policy_name,
-            params=_params_for_log(policy_name, params),
+            params=_received(params),
             reason=str(exc),
         )
         raise ToolError(str(exc)) from exc
     except Exception:
         _log_call(
+            "execute_purge", "error", policy_name=policy_name, params=_received(params)
+        )
+        raise
+    try:
+        result = _execute_loaded(policy, validated, confirmation_token)
+    except PurgePolicyError as exc:
+        _log_call(
             "execute_purge",
-            "error",
+            "rejected",
             policy_name=policy_name,
-            params=_params_for_log(policy_name, params),
+            params=dict(validated),
+            reason=str(exc),
+        )
+        raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "execute_purge", "error", policy_name=policy_name, params=dict(validated)
         )
         raise
     _log_call(
         "execute_purge",
         "consumed",
         policy_name=policy_name,
-        params=dict(params) if params is not None else {},
+        params=dict(validated),
         row_count=result["deleted_count"],
         duration_seconds=result["duration_seconds"],
     )

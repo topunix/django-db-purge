@@ -1068,7 +1068,7 @@ class TestRealToolLayer(TestCase):
         for value in (True, False):
             with (
                 self.subTest(value=value),
-                patch.object(purge_mcp_server, "preview_purge_candidates") as preview,
+                patch.object(purge_mcp_server, "_preview_loaded") as preview,
             ):
                 result = self.call(
                     "preview_purge",
@@ -1079,7 +1079,7 @@ class TestRealToolLayer(TestCase):
             preview.assert_not_called()
 
     def test_json_true_is_rejected_for_execute_too(self):
-        with patch.object(purge_mcp_server, "execute_purge_candidates") as execute:
+        with patch.object(purge_mcp_server, "_execute_loaded") as execute:
             result = self.call(
                 "execute_purge",
                 {
@@ -1101,7 +1101,7 @@ class TestRealToolLayer(TestCase):
                 "token_expires_at": "now",
             }
             with patch.object(
-                purge_mcp_server, "preview_purge_candidates", return_value=canned
+                purge_mcp_server, "_preview_loaded", return_value=canned
             ) as preview:
                 self.call(
                     "preview_purge",
@@ -1450,7 +1450,7 @@ class TestStructuredCallLog(PolicyTestCase):
     def test_unexpected_exception_logs_error_and_is_reraised(self):
         with (
             patch.object(
-                purge_mcp_server, "preview_purge_candidates", side_effect=KeyError("x")
+                purge_mcp_server, "_preview_loaded", side_effect=KeyError("x")
             ),
             self.assertLogs("dbpurge.mcp", "ERROR") as logs,
             self.assertRaises(KeyError),
@@ -1460,6 +1460,20 @@ class TestStructuredCallLog(PolicyTestCase):
         record = self.one_record(logs)
         self.assertEqual(record.outcome, "error")
         self.assertEqual(record.levelname, "ERROR")
+
+    def test_invalid_config_logs_one_policy_error_and_one_call_record(self):
+        bad = {"p": {**POLICIES_BY_NAME["failed_rows"], "action": "archive"}}
+        with (
+            override_settings(DB_PURGE_MCP_POLICIES=bad),
+            self.assertLogs("dbpurge.policies", "ERROR") as policy_logs,
+            self.assertLogs("dbpurge.mcp", "INFO") as call_logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("p")
+
+        self.assertEqual(len(policy_logs.records), 1)
+        self.assertEqual(len(call_logs.records), 1)
+        self.assertEqual(call_logs.records[0].outcome, "rejected")
 
     def test_a_direct_call_has_no_client_identity(self):
         with self.assertLogs("dbpurge.mcp", "INFO") as logs:
