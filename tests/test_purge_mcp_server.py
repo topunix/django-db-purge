@@ -30,8 +30,11 @@ from tests.models import PolicyNote, PolicyRecord, SampleRecord
 
 try:
     import fastmcp
+    from fastmcp.exceptions import ToolError
+    from mcp.types import Implementation
 except ImportError:
     fastmcp = None
+    ToolError = purge_mcp_server.ToolError
 
 skip_without_fastmcp = skipIf(fastmcp is None, "fastmcp is not installed")
 
@@ -1310,3 +1313,166 @@ def describe_policies_json(policies):
     """Round-trip the listing through JSON, as the wire would."""
     with override_settings(DB_PURGE_MCP_POLICIES=policies):
         return json.loads(json.dumps(describe_policies()))
+
+
+class TestStructuredCallLog(PolicyTestCase):
+    """One dbpurge.mcp record per tool call, with fields on the record."""
+
+    def one_record(self, logs):
+        self.assertEqual(len(logs.records), 1)
+        return logs.records[0]
+
+    def preview_tool(self, policy, params=None):
+        return purge_mcp_server.preview_purge(policy, params)
+
+    def test_list_policies_logs_listed_with_the_policy_count(self):
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            purge_mcp_server.list_policies()
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "listed")
+        self.assertEqual(record.row_count, len(POLICIES_BY_NAME))
+        self.assertIsNone(record.policy_name)
+        self.assertIsNone(record.params)
+        self.assertEqual(record.levelname, "INFO")
+
+    def test_preview_logs_issued_with_the_matched_count(self):
+        make_record(created_at=timezone.now() - timedelta(days=5))
+        params = {"older_than_seconds": 3600}
+
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            preview = self.preview_tool("old_rows", params)
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "issued")
+        self.assertEqual(record.policy_name, "old_rows")
+        self.assertEqual(record.params, params)
+        self.assertEqual(record.row_count, preview["row_count"])
+        self.assertEqual(record.levelname, "INFO")
+        self.assertNotIn(preview["confirmation_token"], record.getMessage())
+
+    def test_execute_logs_consumed_with_count_and_timing(self):
+        make_record(status="failed")
+        token = self.preview_tool("failed_rows")["confirmation_token"]
+
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            result = purge_mcp_server.execute_purge("failed_rows", token)
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "consumed")
+        self.assertEqual(record.row_count, result["deleted_count"])
+        self.assertIsInstance(record.duration_seconds, float)
+        self.assertEqual(record.params, {})
+
+    def test_invalid_token_logs_one_rejected_record(self):
+        make_record(status="failed")
+
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError) as ctx,
+        ):
+            purge_mcp_server.execute_purge("failed_rows", "not-a-real-token")
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "rejected")
+        self.assertEqual(record.policy_name, "failed_rows")
+        self.assertIsNone(record.row_count)
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertEqual(str(ctx.exception), TOKEN_ERROR_MESSAGE)
+
+    def test_row_cap_refusal_logs_rejected_with_the_matched_count(self):
+        for _ in range(3):
+            make_record(status="failed")
+
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("capped")
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "rejected")
+        self.assertEqual(record.row_count, 3)
+
+    def test_invalid_params_log_rejected_with_params_as_received(self):
+        bad = {"older_than_seconds": "soon"}
+
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("old_rows", bad)
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "rejected")
+        self.assertEqual(record.params, bad)
+        self.assertIsNone(record.row_count)
+
+    def test_omitted_params_are_logged_as_none_when_rejected(self):
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("old_rows")
+
+        self.assertIsNone(self.one_record(logs).params)
+
+    def test_unknown_policy_logs_rejected(self):
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("no_such_policy")
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "rejected")
+        self.assertEqual(record.policy_name, "no_such_policy")
+
+    def test_unexpected_exception_logs_error_and_is_reraised(self):
+        with (
+            patch.object(
+                purge_mcp_server, "preview_purge_candidates", side_effect=KeyError("x")
+            ),
+            self.assertLogs("dbpurge.mcp", "ERROR") as logs,
+            self.assertRaises(KeyError),
+        ):
+            self.preview_tool("failed_rows")
+
+        record = self.one_record(logs)
+        self.assertEqual(record.outcome, "error")
+        self.assertEqual(record.levelname, "ERROR")
+
+    def test_a_direct_call_has_no_client_identity(self):
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            purge_mcp_server.list_policies()
+
+        record = self.one_record(logs)
+        self.assertIsNone(record.client_name)
+        self.assertIsNone(record.client_version)
+
+    def test_no_log_field_names_a_model(self):
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            purge_mcp_server.list_policies()
+
+        fields = set(vars(self.one_record(logs)))
+        self.assertFalse({"model", "model_name", "agent_model"} & fields)
+
+
+@skip_without_fastmcp
+class TestClientIdentityLogging(TestCase):
+    def test_client_info_from_initialize_is_logged(self):
+        override = override_settings(DB_PURGE_MCP_POLICIES=POLICIES_BY_NAME)
+        override.enable()
+        self.addCleanup(override.disable)
+        info = Implementation(name="test-client", version="9.8.7")
+
+        async def run():
+            async with fastmcp.Client(purge_mcp_server.mcp, client_info=info) as client:
+                return await client.call_tool("list_policies", {})
+
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            asyncio.run(run())
+
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].client_name, "test-client")
+        self.assertEqual(logs.records[0].client_version, "9.8.7")
