@@ -1364,6 +1364,32 @@ class TestStructuredCallLog(PolicyTestCase):
         self.assertIsInstance(record.duration_seconds, float)
         self.assertEqual(record.params, {})
 
+    def test_message_carries_policy_rows_and_duration(self):
+        make_record(status="failed")
+        token = self.preview_tool("failed_rows")["confirmation_token"]
+
+        with self.assertLogs("dbpurge.mcp", "INFO") as logs:
+            result = purge_mcp_server.execute_purge("failed_rows", token)
+
+        message = self.one_record(logs).getMessage()
+        self.assertIn("execute_purge consumed", message)
+        self.assertIn("policy=failed_rows", message)
+        self.assertIn(f"rows={result['deleted_count']}", message)
+        self.assertRegex(message, r"took=\d+\.\d+s")
+
+    def test_message_renders_params_with_repr(self):
+        params = {"older_than_seconds": "1\nFORGED"}
+
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("old_rows", params)
+
+        message = self.one_record(logs).getMessage()
+        self.assertNotIn("\n", message)
+        self.assertIn(f"params={params!r}", message)
+
     def test_invalid_token_logs_one_rejected_record(self):
         make_record(status="failed")
 
