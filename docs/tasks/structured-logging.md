@@ -83,8 +83,9 @@ Out:
 
 - `grep -n 'getLogger("dbpurge.mcp")' dbpurge/management/commands/purge_mcp_server.py`
   finds the logger definition.
-- `grep -n -i 'model_name\|agent_model\|"model"' dbpurge/management/commands/purge_mcp_server.py`
-  finds no log field named for a model.
+- No `extra=` key passed to the `dbpurge.mcp` logger is named for a model
+  (checked by reading `_log_call` and its callers). The existing `"model"` key
+  in list_policies output is not a log field and is unaffected.
 - A test asserts that a rejected execute_purge (invalid token) emits exactly
   one `dbpurge.mcp` record with `outcome == "rejected"`, `policy_name`,
   `params`, and `row_count is None`, and that the ToolError message is still
@@ -103,8 +104,8 @@ Out:
   `client_name is None` and `client_version is None`.
 - `grep -n 'initialize' DESIGN.md` finds the new section, and it states that
   client identity is not model identity.
-- No em dashes in any changed file: `git diff origin/master | grep '^+' | grep -c '—'`
-  prints 0.
+- No em dashes (U+2014) in any added line:
+  `git diff origin/master | grep '^+' | grep -c $'\u2014'` prints 0.
 - `python runtests.py` passes.
 - `ruff check .`, `ruff format --check .`, and `mypy` pass.
 
