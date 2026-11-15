@@ -88,10 +88,12 @@ Out:
   in list_policies output is not a log field and is unaffected.
 - The record message carries the fields, so the default stderr formatter shows
   them: `<tool> <outcome> policy=<name> params=<repr> rows=<n> took=<s>s: <reason>`.
-  Any part whose value is None is omitted. params are rendered with `repr` so
-  newlines in unvalidated input cannot forge log lines. Every extra attribute
-  is still passed unchanged. A test asserts the consumed execute message
-  contains the policy name, row count and duration.
+  Any part whose value is None is omitted. policy and params are rendered with
+  `repr`, and CR and LF in the reason are escaped as `\r` and `\n`, so newlines
+  in unvalidated input cannot forge log lines. Every extra attribute is still
+  passed unchanged. Tests assert the consumed execute message contains the
+  policy name, row count and duration, and that a policy name, params, and a
+  rejection reason containing a newline each leave the message on one line.
 - A test asserts that a rejected execute_purge (invalid token) emits exactly
   one `dbpurge.mcp` record with `outcome == "rejected"`, `policy_name`,
   `params`, and `row_count is None`, and that the ToolError message is still

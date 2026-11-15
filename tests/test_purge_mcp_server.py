@@ -1373,7 +1373,7 @@ class TestStructuredCallLog(PolicyTestCase):
 
         message = self.one_record(logs).getMessage()
         self.assertIn("execute_purge consumed", message)
-        self.assertIn("policy=failed_rows", message)
+        self.assertIn("policy='failed_rows'", message)
         self.assertIn(f"rows={result['deleted_count']}", message)
         self.assertRegex(message, r"took=\d+\.\d+s")
 
@@ -1389,6 +1389,35 @@ class TestStructuredCallLog(PolicyTestCase):
         message = self.one_record(logs).getMessage()
         self.assertNotIn("\n", message)
         self.assertIn(f"params={params!r}", message)
+
+    def test_message_renders_policy_name_with_repr(self):
+        name = "old_rows\nFORGED"
+
+        with (
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool(name)
+
+        message = self.one_record(logs).getMessage()
+        self.assertNotIn("\n", message)
+        self.assertIn(f"policy={name!r}", message)
+
+    def test_message_escapes_cr_and_lf_in_the_reason(self):
+        make_record(status="failed")
+        error = PurgePolicyError("echoed\r\nFORGED line")
+
+        with (
+            patch.object(purge_mcp_server, "_preview_loaded", side_effect=error),
+            self.assertLogs("dbpurge.mcp", "WARNING") as logs,
+            self.assertRaises(ToolError),
+        ):
+            self.preview_tool("failed_rows")
+
+        message = self.one_record(logs).getMessage()
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\r", message)
+        self.assertTrue(message.endswith(": echoed\\r\\nFORGED line"))
 
     def test_invalid_token_logs_one_rejected_record(self):
         make_record(status="failed")

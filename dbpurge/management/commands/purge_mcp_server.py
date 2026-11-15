@@ -282,18 +282,22 @@ def _log_call(
     if duration_seconds is not None:
         extra["duration_seconds"] = duration_seconds
     # Fields go in the message so the default stderr formatter shows them.
-    # params use repr because they may be unvalidated agent input, and repr
-    # escapes newlines so they cannot forge extra log lines.
+    # policy_name and params may be unvalidated agent input, so they use repr,
+    # and reason may echo it, so its CR and LF are escaped. None of them can
+    # then start a forged log line.
     parts = [f"{tool} {outcome}"]
     if policy_name is not None:
-        parts.append(f"policy={policy_name}")
+        parts.append(f"policy={policy_name!r}")
     if params is not None:
         parts.append(f"params={params!r}")
     if row_count is not None:
         parts.append(f"rows={row_count}")
     if duration_seconds is not None:
         parts.append(f"took={duration_seconds:.3f}s")
-    message = " ".join(parts) + (f": {reason}" if reason else "")
+    message = " ".join(parts)
+    if reason:
+        escaped = reason.replace("\r", "\\r").replace("\n", "\\n")
+        message += f": {escaped}"
     call_logger.log(
         _LOG_LEVELS[outcome],
         message,
