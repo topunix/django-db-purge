@@ -1042,18 +1042,18 @@ class TestRealToolLayer(TestCase):
             set(tools), {"list_policies", "preview_purge", "execute_purge"}
         )
         for tool in tools.values():
-            properties = set(tool.inputSchema.get("properties", {}))
+            properties = set(tool.input_schema.get("properties", {}))
             self.assertFalse(properties & FORBIDDEN_ARGUMENTS)
         self.assertEqual(
-            set(tools["preview_purge"].inputSchema["properties"]),
+            set(tools["preview_purge"].input_schema["properties"]),
             {"policy_name", "params"},
         )
         self.assertEqual(
-            set(tools["execute_purge"].inputSchema["properties"]),
+            set(tools["execute_purge"].input_schema["properties"]),
             {"policy_name", "confirmation_token", "params"},
         )
         self.assertEqual(
-            tools["execute_purge"].inputSchema["required"],
+            tools["execute_purge"].input_schema["required"],
             ["policy_name", "confirmation_token"],
         )
 

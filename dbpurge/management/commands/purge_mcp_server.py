@@ -226,10 +226,15 @@ def _client_identity() -> tuple[str | None, str | None]:
     try:
         from fastmcp.server.dependencies import get_context
 
-        client_params = get_context().session.client_params
+        client_params: Any = get_context().session.client_params
         if client_params is None:
             return None, None
-        info = client_params.clientInfo
+        # MCP SDK v2 renamed clientInfo to client_info, v1 still uses clientInfo.
+        info: Any = getattr(client_params, "client_info", None) or getattr(
+            client_params, "clientInfo", None
+        )
+        if info is None:
+            return None, None
         return info.name, info.version
     except Exception:  # Best effort: logging must never break a tool call.
         return None, None
