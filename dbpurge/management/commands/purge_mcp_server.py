@@ -58,6 +58,9 @@ else:
 
 logger = logging.getLogger(__name__)
 
+# One structured record per tool call goes to this logger (see _log_call).
+call_logger = logging.getLogger("dbpurge.mcp")
+
 MISSING_FASTMCP_ERROR = (
     "fastmcp is required to run the MCP server. Install it with "
     'pip install "django-db-purge[mcp]".'
@@ -202,6 +205,107 @@ def describe_policies() -> list[PolicyInfo]:
     ]
 
 
+_LOG_LEVELS = {
+    "listed": logging.INFO,
+    "issued": logging.INFO,
+    "consumed": logging.INFO,
+    "rejected": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+
+def _client_identity() -> tuple[str | None, str | None]:
+    """
+    Return (name, version) the MCP client sent in its initialize request.
+
+    Self-reported and unauthenticated: it names the client application,
+    not the model. Returns (None, None) when there is no active request
+    (a direct Python call) or fastmcp is absent. Never raises, so
+    logging cannot break a tool call.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        client_params: Any = get_context().session.client_params
+        if client_params is None:
+            return None, None
+        # MCP SDK v2 renamed clientInfo to client_info, v1 still uses clientInfo.
+        info: Any = getattr(client_params, "client_info", None) or getattr(
+            client_params, "clientInfo", None
+        )
+        if info is None:
+            return None, None
+        return info.name, info.version
+    except Exception:  # Best effort: logging must never break a tool call.
+        return None, None
+
+
+def _load_request(
+    policy_name: str, params: dict[str, ParamValue] | None
+) -> tuple[Policy, dict[str, ParamValue]]:
+    """
+    Load the policy and validate params: the guard both tools share.
+
+    Runs before any database query. The tool layer calls this once per
+    call and hands the result to the body, so what is logged is exactly
+    what was evaluated.
+    """
+    policy = get_policy(policy_name)
+    return policy, validate_request(policy, params)
+
+
+def _received(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Copy params as received for a record, keeping None for omitted."""
+    return dict(params) if params is not None else None
+
+
+def _log_call(
+    tool: str,
+    outcome: str,
+    *,
+    policy_name: str | None = None,
+    params: object = None,
+    row_count: int | None = None,
+    reason: str | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    """Emit the single structured dbpurge.mcp record for one tool call."""
+    client_name, client_version = _client_identity()
+    extra: dict[str, object] = {
+        "policy_name": policy_name,
+        "params": params,
+        "row_count": row_count,
+        "outcome": outcome,
+        "client_name": client_name,
+        "client_version": client_version,
+    }
+    if duration_seconds is not None:
+        extra["duration_seconds"] = duration_seconds
+    # Fields go in the message so the default stderr formatter shows them.
+    # policy_name and params may be unvalidated agent input, so they use repr,
+    # and reason may echo it, so its CR and LF are escaped. None of them can
+    # then start a forged log line.
+    parts = [f"{tool} {outcome}"]
+    if policy_name is not None:
+        parts.append(f"policy={policy_name!r}")
+    if params is not None:
+        parts.append(f"params={params!r}")
+    if row_count is not None:
+        parts.append(f"rows={row_count}")
+    if duration_seconds is not None:
+        parts.append(f"took={duration_seconds:.3f}s")
+    message = " ".join(parts)
+    if reason:
+        escaped = reason.replace("\r", "\\r").replace("\n", "\\n")
+        message += f": {escaped}"
+    call_logger.log(
+        _LOG_LEVELS[outcome],
+        message,
+        extra=extra,
+        exc_info=outcome == "error",
+    )
+
+
 @mcp.tool
 def list_policies() -> list[PolicyInfo]:
     """
@@ -219,9 +323,15 @@ def list_policies() -> list[PolicyInfo]:
     of choices exactly. An empty list means nothing is purgeable.
     """
     try:
-        return describe_policies()
+        policies = describe_policies()
     except PurgePolicyError as exc:
+        _log_call("list_policies", "rejected", reason=str(exc))
         raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call("list_policies", "error")
+        raise
+    _log_call("list_policies", "listed", row_count=len(policies))
+    return policies
 
 
 def _evict_expired_tokens() -> None:
@@ -353,6 +463,14 @@ def effective_max_rows(policy: Policy) -> int:
     return policy.max_rows if policy.max_rows is not None else global_cap
 
 
+class PurgeRowCapError(PurgePolicyError):
+    """A preview matched more rows than the cap allows; row_count is the match."""
+
+    def __init__(self, message: str, row_count: int) -> None:
+        super().__init__(message)
+        self.row_count = row_count
+
+
 class PurgePreview(TypedDict):
     row_count: int
     sample_rows: list[dict[str, object]]
@@ -406,16 +524,21 @@ def preview_purge_candidates(
     effective row cap is refused here, so no token is issued for a
     purge that execute_purge would reject.
     """
-    policy = get_policy(policy_name)
-    validated = validate_request(policy, params)
+    policy, validated = _load_request(policy_name, params)
+    return _preview_loaded(policy, validated)
+
+
+def _preview_loaded(policy: Policy, validated: dict[str, ParamValue]) -> PurgePreview:
+    """Preview body: count, sample and token for an already validated request."""
     matched = build_queryset(policy, validated, timezone.now())
 
     row_count = matched.count()
     max_rows = effective_max_rows(policy)
     if row_count > max_rows:
-        raise PurgePolicyError(
+        raise PurgeRowCapError(
             f"Policy would match {row_count} rows, exceeding its max of {max_rows}. "
-            "Narrow the params and preview again."
+            "Narrow the params and preview again.",
+            row_count,
         )
     sample_rows = _sample_rows(policy, matched, PREVIEW_SAMPLE_SIZE)
     pk_list, fingerprint = _row_set_snapshot(
@@ -423,13 +546,6 @@ def preview_purge_candidates(
     )
     token, expires_at = issue_token(
         policy.name, validated, pk_list, fingerprint, row_count
-    )
-
-    logger.info(
-        "Previewed purge policy %s params=%s: %s rows matched",
-        policy.name,
-        validated,
-        row_count,
     )
 
     return {
@@ -462,9 +578,46 @@ def preview_purge(
     rows. This tool performs no deletion.
     """
     try:
-        return preview_purge_candidates(policy_name, params)
+        policy, validated = _load_request(policy_name, params)
     except PurgePolicyError as exc:
+        _log_call(
+            "preview_purge",
+            "rejected",
+            policy_name=policy_name,
+            params=_received(params),
+            reason=str(exc),
+        )
         raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "preview_purge", "error", policy_name=policy_name, params=_received(params)
+        )
+        raise
+    try:
+        preview = _preview_loaded(policy, validated)
+    except PurgePolicyError as exc:
+        _log_call(
+            "preview_purge",
+            "rejected",
+            policy_name=policy_name,
+            params=dict(validated),
+            row_count=exc.row_count if isinstance(exc, PurgeRowCapError) else None,
+            reason=str(exc),
+        )
+        raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "preview_purge", "error", policy_name=policy_name, params=dict(validated)
+        )
+        raise
+    _log_call(
+        "preview_purge",
+        "issued",
+        policy_name=policy_name,
+        params=dict(validated),
+        row_count=preview["row_count"],
+    )
+    return preview
 
 
 class PurgeResult(TypedDict):
@@ -523,9 +676,14 @@ def execute_purge_candidates(
     already makes phantom inserts harmless and the lock is a nicety on
     top of that, not the safety mechanism.
     """
-    policy = get_policy(policy_name)
-    validated = validate_request(policy, params)
+    policy, validated = _load_request(policy_name, params)
+    return _execute_loaded(policy, validated, confirmation_token)
 
+
+def _execute_loaded(
+    policy: Policy, validated: dict[str, ParamValue], confirmation_token: str
+) -> PurgeResult:
+    """Execute body: consume the token and delete for a validated request."""
     record = _pop_valid_token(confirmation_token, policy.name, validated)
     if record is None:
         raise PurgePolicyError(TOKEN_ERROR_MESSAGE)
@@ -569,13 +727,6 @@ def execute_purge_candidates(
         raise
     took = time.monotonic() - start_time
 
-    logger.info(
-        "Executed purge policy %s params=%s: deleted %s rows (took %.3fs)",
-        policy.name,
-        validated,
-        deleted_total,
-        took,
-    )
     logger.debug(
         "Purge delete breakdown for policy %s: %s", policy.name, deleted_by_model
     )
@@ -628,9 +779,46 @@ def execute_purge(
     counts, rather than deleting a set the caller never saw.
     """
     try:
-        return execute_purge_candidates(policy_name, confirmation_token, params)
+        policy, validated = _load_request(policy_name, params)
     except PurgePolicyError as exc:
+        _log_call(
+            "execute_purge",
+            "rejected",
+            policy_name=policy_name,
+            params=_received(params),
+            reason=str(exc),
+        )
         raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "execute_purge", "error", policy_name=policy_name, params=_received(params)
+        )
+        raise
+    try:
+        result = _execute_loaded(policy, validated, confirmation_token)
+    except PurgePolicyError as exc:
+        _log_call(
+            "execute_purge",
+            "rejected",
+            policy_name=policy_name,
+            params=dict(validated),
+            reason=str(exc),
+        )
+        raise ToolError(str(exc)) from exc
+    except Exception:
+        _log_call(
+            "execute_purge", "error", policy_name=policy_name, params=dict(validated)
+        )
+        raise
+    _log_call(
+        "execute_purge",
+        "consumed",
+        policy_name=policy_name,
+        params=dict(validated),
+        row_count=result["deleted_count"],
+        duration_seconds=result["duration_seconds"],
+    )
+    return result
 
 
 def configure_stderr_logging(level: int = logging.INFO) -> None:
