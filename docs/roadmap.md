@@ -74,8 +74,8 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    dependency.
    Verify: an `[otel]` extra exists in `setup.py` on `master`.
 
-5. **release-2-0**: version bump to 2.0.0, migration note showing the old `days` call
-   expressed as a policy, the maintainer publishes to PyPI through the existing
+5. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
+   call expressed as a policy. The maintainer publishes to PyPI through the existing
    `publish.yml` release workflow after the PR merges.
    Decided: the task never publishes, tags, or creates a GitHub release.
    The migration note must also cover these behavior changes from 1.x:
