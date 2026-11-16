@@ -3,7 +3,7 @@ import inspect
 import json
 from dataclasses import replace
 from datetime import date, timedelta
-from unittest import skipIf
+from unittest import skipIf, skipUnless
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings
@@ -12,6 +12,7 @@ from django.core.management import CommandError, call_command
 from django.db import connection
 from django.db.models import Q, QuerySet
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from dbpurge.management.commands import purge_mcp_server
@@ -316,18 +317,41 @@ class TestRowSetFingerprinting(TestCase):
         self.assertTrue(token_is_valid(token, POLICY, PARAMS))
 
     def test_execute_succeeds_on_backend_without_select_for_update_support(self):
-        # Proves execute still works when the backend can't lock rows
-        # (true of SQLite here); it does NOT exercise the gate itself,
-        # since has_select_for_update is False so select_for_update()
-        # is never called. See test_select_for_update_applied_when_
-        # backend_supports_it for that.
-        self.assertFalse(connection.features.has_select_for_update)
+        # Proves execute still works when the backend can't lock rows.
+        # SQLite really lacks support; on a backend that has it, the
+        # feature flag is patched off to simulate the unsupported case.
+        # It does NOT exercise the gate itself. See
+        # test_select_for_update_applied_when_backend_supports_it.
+        with patch.object(connection.features, "has_select_for_update", False):
+            preview = preview_purge_candidates(POLICY, PARAMS)
 
-        preview = preview_purge_candidates(POLICY, PARAMS)
-
-        result = execute_purge_candidates(POLICY, preview["confirmation_token"], PARAMS)
+            result = execute_purge_candidates(
+                POLICY, preview["confirmation_token"], PARAMS
+            )
 
         self.assertEqual(result["deleted_count"], 1)
+        self.assertFalse(SampleRecord.objects.filter(pk=self.old_record.pk).exists())
+
+    @skipUnless(
+        connection.features.has_select_for_update,
+        "backend cannot lock rows (SQLite); covered by a mock below",
+    )
+    def test_execute_locks_rows_with_for_update_on_a_real_database(self):
+        # No mocking: a real preview and execute, with the SQL captured to
+        # prove the locking query ran and the rows were actually deleted.
+        preview = preview_purge_candidates(POLICY, PARAMS)
+
+        with CaptureQueriesContext(connection) as queries:
+            result = execute_purge_candidates(
+                POLICY, preview["confirmation_token"], PARAMS
+            )
+
+        self.assertTrue(
+            any("FOR UPDATE" in q["sql"].upper() for q in queries),
+            [q["sql"] for q in queries],
+        )
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertFalse(SampleRecord.objects.filter(pk=self.old_record.pk).exists())
 
     def test_select_for_update_applied_when_backend_supports_it(self):
         # SQLite itself can't run SELECT ... FOR UPDATE, so

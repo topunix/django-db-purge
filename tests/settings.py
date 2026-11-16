@@ -8,16 +8,31 @@ INSTALLED_APPS = [
     "dbpurge",
     "tests",
 ]
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        # In-memory for the unit test suite. The stdio e2e driver
-        # overrides this to a file path via DBPURGE_TEST_DB so the
-        # seeding step and the subprocess server can see the same
-        # database.
-        "NAME": os.environ.get("DBPURGE_TEST_DB", ":memory:"),
+if os.environ.get("DBPURGE_TEST_DB_ENGINE") == "postgresql":
+    # Opt-in PostgreSQL backend, used by the CI postgres job so row-locking
+    # paths run against a database that supports them. Defaults match a
+    # stock local server. Django creates and drops a test_ database itself.
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("DBPURGE_TEST_DB_NAME", "postgres"),
+            "USER": os.environ.get("DBPURGE_TEST_DB_USER", "postgres"),
+            "PASSWORD": os.environ.get("DBPURGE_TEST_DB_PASSWORD", "postgres"),
+            "HOST": os.environ.get("DBPURGE_TEST_DB_HOST", "localhost"),
+            "PORT": os.environ.get("DBPURGE_TEST_DB_PORT", "5432"),
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            # In-memory for the unit test suite. The stdio e2e driver
+            # overrides this to a file path via DBPURGE_TEST_DB so the
+            # seeding step and the subprocess server can see the same
+            # database.
+            "NAME": os.environ.get("DBPURGE_TEST_DB", ":memory:"),
+        }
+    }
 USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
