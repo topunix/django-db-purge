@@ -21,6 +21,7 @@ from django.db import connection, transaction
 from django.db.models import Model, QuerySet
 from django.utils import timezone
 
+from dbpurge import telemetry
 from dbpurge.policies import (
     Param,
     ParamValue,
@@ -270,6 +271,7 @@ def _log_call(
     duration_seconds: float | None = None,
 ) -> None:
     """Emit the single structured dbpurge.mcp record for one tool call."""
+    telemetry.record_outcome(outcome, row_count)
     client_name, client_version = _client_identity()
     extra: dict[str, object] = {
         "policy_name": policy_name,
@@ -322,16 +324,17 @@ def list_policies() -> list[PolicyInfo]:
     means a float such as 5.0 is rejected), and choice must equal one
     of choices exactly. An empty list means nothing is purgeable.
     """
-    try:
-        policies = describe_policies()
-    except PurgePolicyError as exc:
-        _log_call("list_policies", "rejected", reason=str(exc))
-        raise ToolError(str(exc)) from exc
-    except Exception:
-        _log_call("list_policies", "error")
-        raise
-    _log_call("list_policies", "listed", row_count=len(policies))
-    return policies
+    with telemetry.tool_span("list_policies"):
+        try:
+            policies = describe_policies()
+        except PurgePolicyError as exc:
+            _log_call("list_policies", "rejected", reason=str(exc))
+            raise ToolError(str(exc)) from exc
+        except Exception:
+            _log_call("list_policies", "error")
+            raise
+        _log_call("list_policies", "listed", row_count=len(policies))
+        return policies
 
 
 def _evict_expired_tokens() -> None:
@@ -577,47 +580,54 @@ def preview_purge(
     to execute_purge before it expires (5 minutes) to actually delete
     rows. This tool performs no deletion.
     """
-    try:
-        policy, validated = _load_request(policy_name, params)
-    except PurgePolicyError as exc:
+    with telemetry.tool_span("preview_purge", policy_name):
+        try:
+            policy, validated = _load_request(policy_name, params)
+        except PurgePolicyError as exc:
+            _log_call(
+                "preview_purge",
+                "rejected",
+                policy_name=policy_name,
+                params=_received(params),
+                reason=str(exc),
+            )
+            raise ToolError(str(exc)) from exc
+        except Exception:
+            _log_call(
+                "preview_purge",
+                "error",
+                policy_name=policy_name,
+                params=_received(params),
+            )
+            raise
+        try:
+            preview = _preview_loaded(policy, validated)
+        except PurgePolicyError as exc:
+            _log_call(
+                "preview_purge",
+                "rejected",
+                policy_name=policy_name,
+                params=dict(validated),
+                row_count=exc.row_count if isinstance(exc, PurgeRowCapError) else None,
+                reason=str(exc),
+            )
+            raise ToolError(str(exc)) from exc
+        except Exception:
+            _log_call(
+                "preview_purge",
+                "error",
+                policy_name=policy_name,
+                params=dict(validated),
+            )
+            raise
         _log_call(
             "preview_purge",
-            "rejected",
-            policy_name=policy_name,
-            params=_received(params),
-            reason=str(exc),
-        )
-        raise ToolError(str(exc)) from exc
-    except Exception:
-        _log_call(
-            "preview_purge", "error", policy_name=policy_name, params=_received(params)
-        )
-        raise
-    try:
-        preview = _preview_loaded(policy, validated)
-    except PurgePolicyError as exc:
-        _log_call(
-            "preview_purge",
-            "rejected",
+            "issued",
             policy_name=policy_name,
             params=dict(validated),
-            row_count=exc.row_count if isinstance(exc, PurgeRowCapError) else None,
-            reason=str(exc),
+            row_count=preview["row_count"],
         )
-        raise ToolError(str(exc)) from exc
-    except Exception:
-        _log_call(
-            "preview_purge", "error", policy_name=policy_name, params=dict(validated)
-        )
-        raise
-    _log_call(
-        "preview_purge",
-        "issued",
-        policy_name=policy_name,
-        params=dict(validated),
-        row_count=preview["row_count"],
-    )
-    return preview
+        return preview
 
 
 class PurgeResult(TypedDict):
@@ -778,47 +788,54 @@ def execute_purge(
     "row set changed" error naming the previewed and current row
     counts, rather than deleting a set the caller never saw.
     """
-    try:
-        policy, validated = _load_request(policy_name, params)
-    except PurgePolicyError as exc:
+    with telemetry.tool_span("execute_purge", policy_name):
+        try:
+            policy, validated = _load_request(policy_name, params)
+        except PurgePolicyError as exc:
+            _log_call(
+                "execute_purge",
+                "rejected",
+                policy_name=policy_name,
+                params=_received(params),
+                reason=str(exc),
+            )
+            raise ToolError(str(exc)) from exc
+        except Exception:
+            _log_call(
+                "execute_purge",
+                "error",
+                policy_name=policy_name,
+                params=_received(params),
+            )
+            raise
+        try:
+            result = _execute_loaded(policy, validated, confirmation_token)
+        except PurgePolicyError as exc:
+            _log_call(
+                "execute_purge",
+                "rejected",
+                policy_name=policy_name,
+                params=dict(validated),
+                reason=str(exc),
+            )
+            raise ToolError(str(exc)) from exc
+        except Exception:
+            _log_call(
+                "execute_purge",
+                "error",
+                policy_name=policy_name,
+                params=dict(validated),
+            )
+            raise
         _log_call(
             "execute_purge",
-            "rejected",
-            policy_name=policy_name,
-            params=_received(params),
-            reason=str(exc),
-        )
-        raise ToolError(str(exc)) from exc
-    except Exception:
-        _log_call(
-            "execute_purge", "error", policy_name=policy_name, params=_received(params)
-        )
-        raise
-    try:
-        result = _execute_loaded(policy, validated, confirmation_token)
-    except PurgePolicyError as exc:
-        _log_call(
-            "execute_purge",
-            "rejected",
+            "consumed",
             policy_name=policy_name,
             params=dict(validated),
-            reason=str(exc),
+            row_count=result["deleted_count"],
+            duration_seconds=result["duration_seconds"],
         )
-        raise ToolError(str(exc)) from exc
-    except Exception:
-        _log_call(
-            "execute_purge", "error", policy_name=policy_name, params=dict(validated)
-        )
-        raise
-    _log_call(
-        "execute_purge",
-        "consumed",
-        policy_name=policy_name,
-        params=dict(validated),
-        row_count=result["deleted_count"],
-        duration_seconds=result["duration_seconds"],
-    )
-    return result
+        return result
 
 
 def configure_stderr_logging(level: int = logging.INFO) -> None:
