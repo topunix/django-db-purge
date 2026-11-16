@@ -8,6 +8,8 @@ You implement a single task spec. You are given the spec path and a branch.
 Rules:
 - Before anything else, run python -m pip install --upgrade ".[mcp]" so
   local dependency versions match what CI installs.
+- If that install fails with an install_layout error, run
+  python -m pip install --ignore-installed setuptools, then retry.
 - Read the spec and CLAUDE.md first. The spec is the plan. Do not ask for
   confirmation.
 - Stay inside the spec's Scope and Files touched. If the spec is wrong or

@@ -17,22 +17,12 @@ The maintainer deletes shipped items after the PR merges.
 
 ## Sequenced queue
 
-Sequencing: Postgres CI first, so the select_for_update path is tested before anything
-builds on it. The harness attacks the 2.0 interface. Spans land before the release so 2.0
-ships observable. Batched cron deletes follow the release and are measured against a real
-load test before they are changed. retention-holds and cascade-preview are parked in
-Unscheduled. If they return, they add their own sections to the attack registry.
+Sequencing: The harness attacks the 2.0 interface. Batched cron deletes follow the release
+and are measured against a real load test before they are changed. retention-holds and
+cascade-preview are parked in Unscheduled. If they return, they add their own sections to
+the attack registry.
 
-1. **postgres-ci**: run the full test suite against PostgreSQL in CI, so the
-   select_for_update branch in execute is exercised.
-   Decided: a GitHub Actions Postgres service container, on one Python version. SQLite
-   jobs stay.
-   Decided: PostgreSQL 17. The CI service image is postgres:17. Bump it when the
-   deployed RDS major version changes.
-   Verify: .github/workflows/ci.yml on master has a job with a postgres service that runs
-   runtests.py.
-
-2. **adversarial-harness**: a declarative attack registry and runner that red-teams the
+1. **adversarial-harness**: a declarative attack registry and runner that red-teams the
    MCP surface, with a published results table.
    Decided: categories are token lifecycle, parameter binding, row-set fingerprinting,
    allowlist and scope escape, row cap enforcement, and protocol/injection. The
@@ -49,19 +39,7 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Suspected gap: aggregate row cap bypass across multiple calls.
    Verify: `evals/README.md` on `master` contains a threat model and a results table.
 
-3. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
-   Decided: the [otel] extra installs opentelemetry-api only. The package configures no
-   SDK and no exporter. The host application does that.
-   Decided: one span per tool call, named dbpurge.list_policies,
-   dbpurge.preview_purge, and dbpurge.execute_purge. Attributes are policy name,
-   outcome, and row count. Param values are not recorded on spans.
-   Decided: with the extra not installed, the server behaves exactly as it does today.
-   A test asserts this.
-   Decided: tests use the in-memory span exporter from opentelemetry-sdk as a test-only
-   dependency.
-   Verify: an `[otel]` extra exists in `setup.py` on `master`.
-
-4. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
+2. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
    call expressed as a policy. The maintainer publishes to PyPI through the existing
    `publish.yml` release workflow after the PR merges.
    Decided: the task never publishes, tags, or creates a GitHub release.
@@ -70,13 +48,13 @@ Unscheduled. If they return, they add their own sections to the attack registry.
      no token. In 1.x a preview reported any count and only execute enforced the cap.
    - `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, so a value of 0 is now
      invalid. In 1.x a value of 0 blocked every purge.
-   Depends on: postgres-ci, adversarial-harness, otel-spans.
+   Depends on: adversarial-harness.
    Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
    match `python_requires`.
    Verify: `setup.py` on `master` has version 2.0.0 and the README has a migration
    section.
 
-5. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
+3. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
    of one count() and one queryset.delete().
    Decided: measure first. Run it against a large, growing table under load and record
    the numbers before changing anything, so the change ships with a before and after.
@@ -91,7 +69,6 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Decided: the measurement is a script that seeds 500,000 expired rows and times the
    command before and after the change, on PostgreSQL. The numbers and the backend go
    in the PR description. The script is committed under benchmarks/.
-   Depends on: postgres-ci.
    Verify: a test on master asserts db_purge deletes in more than one batch when matches
    exceed the batch size.
 
