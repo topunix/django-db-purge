@@ -18,10 +18,9 @@ The maintainer deletes shipped items after the PR merges.
 ## Sequenced queue
 
 Sequencing: Postgres CI first, so the select_for_update path is tested before anything
-builds on it. Logging lands before the harness so attack cases can assert on what the
-server recorded. The harness attacks the 2.0 interface. Spans land before the release so
-2.0 ships observable. Batched cron deletes follow the release and are measured against a
-real load test before they are changed. retention-holds and cascade-preview are parked in
+builds on it. The harness attacks the 2.0 interface. Spans land before the release so 2.0
+ships observable. Batched cron deletes follow the release and are measured against a real
+load test before they are changed. retention-holds and cascade-preview are parked in
 Unscheduled. If they return, they add their own sections to the attack registry.
 
 1. **postgres-ci**: run the full test suite against PostgreSQL in CI, so the
@@ -33,18 +32,7 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Verify: .github/workflows/ci.yml on master has a job with a postgres service that runs
    runtests.py.
 
-2. **structured-logging**: one stdlib `logging` record per tool call, emitted where a
-   token is issued, consumed, or rejected.
-   Decided: fields are policy name, params, row count, outcome, `client_name`, and
-   `client_version`. MCP stdio gives client identity from the `initialize` handshake,
-   not model identity, and DESIGN.md says so.
-   Rejected: a field named for the agent model. It would hold a client string and
-   overclaim.
-   Rejected for now: a DB-backed audit model. See audit-model.
-   Verify: a test on `master` asserts a rejected execute emits a log record with an
-   outcome field.
-
-3. **adversarial-harness**: a declarative attack registry and runner that red-teams the
+2. **adversarial-harness**: a declarative attack registry and runner that red-teams the
    MCP surface, with a published results table.
    Decided: categories are token lifecycle, parameter binding, row-set fingerprinting,
    allowlist and scope escape, row cap enforcement, and protocol/injection. The
@@ -59,10 +47,9 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    Decided: injection testing is a static payload corpus. A live agent loop is out of
    scope for CI and would be a separate opt-in script.
    Suspected gap: aggregate row cap bypass across multiple calls.
-   Depends on: structured-logging.
    Verify: `evals/README.md` on `master` contains a threat model and a results table.
 
-4. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
+3. **otel-spans**: OpenTelemetry spans on tool calls, as an optional extra.
    Decided: the [otel] extra installs opentelemetry-api only. The package configures no
    SDK and no exporter. The host application does that.
    Decided: one span per tool call, named dbpurge.list_policies,
@@ -74,7 +61,7 @@ Unscheduled. If they return, they add their own sections to the attack registry.
    dependency.
    Verify: an `[otel]` extra exists in `setup.py` on `master`.
 
-5. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
+4. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
    call expressed as a policy. The maintainer publishes to PyPI through the existing
    `publish.yml` release workflow after the PR merges.
    Decided: the task never publishes, tags, or creates a GitHub release.
@@ -83,13 +70,13 @@ Unscheduled. If they return, they add their own sections to the attack registry.
      no token. In 1.x a preview reported any count and only execute enforced the cap.
    - `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, so a value of 0 is now
      invalid. In 1.x a value of 0 blocked every purge.
-   Depends on: postgres-ci, structured-logging, adversarial-harness, otel-spans.
+   Depends on: postgres-ci, adversarial-harness, otel-spans.
    Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
    match `python_requires`.
    Verify: `setup.py` on `master` has version 2.0.0 and the README has a migration
    section.
 
-6. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
+5. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
    of one count() and one queryset.delete().
    Decided: measure first. Run it against a large, growing table under load and record
    the numbers before changing anything, so the change ships with a before and after.
