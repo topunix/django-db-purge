@@ -23,7 +23,10 @@ setup(
     long_description=long_description,
     python_requires=">=3.10",
     install_requires=["Django>=2"],
-    extras_require={"mcp": ["fastmcp>=3.0"]},
+    extras_require={
+        "mcp": ["fastmcp>=3.0"],
+        "otel": ["opentelemetry-api>=1.20,<2"],
+    },
     url="https://github.com/topunix/django-db-purge",
     author="topunix",
     author_email="833824+topunix@users.noreply.github.com",
