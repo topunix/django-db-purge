@@ -48,6 +48,7 @@ For each item:
    link to the spec, acceptance criteria with results, Deviations, and
    unresolved reviewer findings. If review did not reach APPROVE in 3
    rounds, open it as a draft and say so in the title.
+   The PR body contains no attribution line and no session URL.
 
 8. CI. Wait for the PR checks. On failure, have the implementer fix it and
    push, at most 3 attempts. After any CI fix, delegate to the reviewer
