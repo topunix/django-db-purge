@@ -6,7 +6,9 @@ Implement these roadmap items from docs/roadmap.md, in the order given:
 $ARGUMENTS
 
 This run is unattended. Never wait for the user. Never merge. Never push to
-master. Process every item even if an earlier one fails.
+master. Pushing the item's slug-named branch is pre-authorized, even when the
+session designates a different working branch. Process every item even if an
+earlier one fails.
 
 Resolve queue numbers to slugs against the current file and use slugs from
 then on.
@@ -48,8 +50,10 @@ For each item:
    rounds, open it as a draft and say so in the title.
 
 8. CI. Wait for the PR checks. On failure, have the implementer fix it and
-   push, at most 3 attempts. An item is green only when checks pass and the
-   reviewer approved.
+   push, at most 3 attempts. After any CI fix, delegate to the reviewer
+   once more, limited to the commits pushed since its last verdict. An
+   item is green only when checks pass and the reviewer has approved the
+   final commit.
 
 Keep your own context small: hold per-item summaries, not file contents.
 
