@@ -371,6 +371,14 @@ python runtests.py
 
 This runs the full Django test suite, including token lifecycle, allowlist, and row-cap coverage, against an in-memory sqlite database.
 
+To run the suite against PostgreSQL instead (needs a running server and a driver, for example `pip install "psycopg[binary]"`), set `DBPURGE_TEST_DB_ENGINE=postgresql`. Connection settings come from `DBPURGE_TEST_DB_NAME`, `DBPURGE_TEST_DB_USER`, `DBPURGE_TEST_DB_PASSWORD`, `DBPURGE_TEST_DB_HOST`, and `DBPURGE_TEST_DB_PORT`, defaulting to `postgres`, `postgres`, `postgres`, `localhost`, and `5432`:
+
+```bash
+DBPURGE_TEST_DB_ENGINE=postgresql python runtests.py
+```
+
+This is the only configuration where the row-locking (`select_for_update`) path runs against a real database. CI runs it on PostgreSQL 17.
+
 To exercise the server the way a real MCP client would, over an actual stdio subprocess:
 
 ```bash

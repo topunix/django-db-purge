@@ -37,6 +37,40 @@ jobs:
           pip install ".${{ matrix.extra }}"
       - name: Run tests
         run: python runtests.py
+  test-postgres:
+    # Runs the suite on PostgreSQL 17 so the select_for_update branch of
+    # execute is exercised against a database that supports row locking
+    # (SQLite does not). The driver is installed here only, not in setup.py.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DBPURGE_TEST_DB_ENGINE: postgresql
+      DBPURGE_TEST_DB_HOST: localhost
+      DBPURGE_TEST_DB_PORT: "5432"
+      DBPURGE_TEST_DB_USER: postgres
+      DBPURGE_TEST_DB_PASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and PostgreSQL driver
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[mcp]" "psycopg[binary]>=3,<4"
+      - name: Run tests on PostgreSQL
+        run: python runtests.py
   lint:
     # Tool versions are pinned so a new ruff or mypy release cannot break CI
     # on an unrelated branch. The package is installed with the [mcp] extra so
