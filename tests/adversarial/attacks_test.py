@@ -23,22 +23,29 @@ pytestmark = pytest.mark.adversarial
 
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
 def test_attack(case: Case, db: None, record_result: Any) -> None:
-    outcome = run_attack(case.id)
+    record = {
+        "id": case.id,
+        "category": case.category,
+        "title": case.title,
+        "expected": case.expected,
+        "severity": case.severity,
+        "proposed_fix": case.proposed_fix,
+    }
+    try:
+        outcome = run_attack(case.id)
+    except Exception as exc:
+        # A crashing attack still leaves a failing record, never a gap.
+        record.update(
+            observed="error",
+            passed=False,
+            evidence=f"harness error: {type(exc).__name__}",
+        )
+        record_result(record)
+        raise
     want = "blocked" if case.expected == "blocked" else "not_blocked"
     passed = outcome.observed == want
-    record_result(
-        {
-            "id": case.id,
-            "category": case.category,
-            "title": case.title,
-            "expected": case.expected,
-            "observed": outcome.observed,
-            "passed": passed,
-            "evidence": outcome.evidence,
-            "severity": case.severity,
-            "proposed_fix": case.proposed_fix,
-        }
-    )
+    record.update(observed=outcome.observed, passed=passed, evidence=outcome.evidence)
+    record_result(record)
     if case.expected == "blocked":
         assert passed, f"not blocked: {outcome.evidence}"
     else:
@@ -93,6 +100,8 @@ SAMPLE_RESULTS = [
     },
 ]
 
+IDS = {"a-blocked", "b-open"}
+
 EXPECTED_REGION = """\
 | ID | Category | Attack | Expected | Observed | Result |
 | --- | --- | --- | --- | --- | --- |
@@ -118,13 +127,26 @@ def test_report_check_detects_a_stale_region(tmp_path: Path) -> None:
     )
     stale = readme.read_text(encoding="utf-8")
 
-    assert report.main([str(results), "--check", "--readme", str(readme)]) == 1
+    assert report.main([str(results), "--check", "--readme", str(readme)], IDS) == 1
     assert readme.read_text(encoding="utf-8") == stale
 
-    assert report.main([str(results), "--readme", str(readme)]) == 0
+    assert report.main([str(results), "--readme", str(readme)], IDS) == 0
     assert EXPECTED_REGION in readme.read_text(encoding="utf-8")
-    assert report.main([str(results), "--check", "--readme", str(readme)]) == 0
+    assert report.main([str(results), "--check", "--readme", str(readme)], IDS) == 0
 
 
 def test_registry_cases_serialize() -> None:
     assert all(asdict(case)["id"] for case in CASES)
+
+
+def test_report_rejects_results_that_miss_a_case(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps(SAMPLE_RESULTS[:1]), encoding="utf-8")
+    readme = tmp_path / "README.md"
+    readme.write_text(f"{report.START}\n{report.END}\n", encoding="utf-8")
+    assert report.main([str(results), "--readme", str(readme)], IDS) == 2
+
+
+def test_report_marks_a_crashed_case_as_a_failure() -> None:
+    crashed = {**SAMPLE_RESULTS[0], "observed": "error", "passed": False}
+    assert "| error | FAIL |" in report.render([crashed])

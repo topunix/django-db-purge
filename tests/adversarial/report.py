@@ -11,8 +11,11 @@ is 1 when the file would change.
 import argparse
 import json
 import sys
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
+
+from tests.adversarial.registry import CASES
 
 START = "<!-- adversarial-results:start -->"
 END = "<!-- adversarial-results:end -->"
@@ -71,7 +74,13 @@ def replace_region(text: str, region: str) -> str:
     return text[:start] + "\n" + region + text[end:]
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, case_ids: Collection[str] | None = None) -> int:
+    """
+    Run the report. Exit 2 when the results do not cover exactly the case ids.
+
+    case_ids defaults to the registry, so a case whose attack crashed or
+    was never run cannot pass the staleness check silently.
+    """
     parser = argparse.ArgumentParser(prog="python -m tests.adversarial.report")
     parser.add_argument("results", help="JSON written by --adversarial-json")
     parser.add_argument("--check", action="store_true", help="fail if stale")
@@ -79,6 +88,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     results = json.loads(Path(args.results).read_text(encoding="utf-8"))
+    wanted = {case.id for case in CASES} if case_ids is None else set(case_ids)
+    found = {record["id"] for record in results}
+    if found != wanted:
+        print(
+            f"results and registry differ, missing {sorted(wanted - found)}, "
+            f"unexpected {sorted(found - wanted)}",
+            file=sys.stderr,
+        )
+        return 2
     readme = Path(args.readme)
     current = readme.read_text(encoding="utf-8")
     updated = replace_region(current, render(results))
