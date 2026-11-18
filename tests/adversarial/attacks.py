@@ -217,6 +217,15 @@ def _refusal(fn: Callable[[], object]) -> str | None:
     return None
 
 
+def _refusal_text(fn: Callable[[], object]) -> str | None:
+    """Return the message of the PurgePolicyError fn raises, else None."""
+    try:
+        fn()
+    except PurgePolicyError as exc:
+        return str(exc)
+    return None
+
+
 def _tool_message(result: Any) -> str:
     return "".join(getattr(block, "text", "") for block in result.content)
 
@@ -265,12 +274,12 @@ def token_expired() -> Outcome:
         token = _token()
         later = timezone.now() + TOKEN_TTL + timedelta(minutes=1)
         with patch("django.utils.timezone.now", return_value=later):
-            refusal = _refusal(
+            refusal = _refusal_text(
                 lambda: execute_purge_candidates(STALE, token, STALE_PARAMS)
             )
     remaining = SampleRecord.objects.count()
-    if refusal is None or remaining != 3:
-        return not_blocked(f"expired token result {refusal}, {remaining} of 3 remain")
+    if refusal != TOKEN_ERROR_MESSAGE or remaining != 3:
+        return not_blocked(f"expired token result {refusal!r}, {remaining} of 3 remain")
     return blocked("token rejected 1 minute past the TTL, 3 of 3 rows remain")
 
 
@@ -311,14 +320,16 @@ def binding_different_value() -> Outcome:
     make_samples(1, age_days=10)
     make_samples(1, age_days=1)
     with harness_settings():
-        narrow = {"older_than_seconds": 5 * 86400}
-        token = _token(STALE, narrow)
-        wider = {"older_than_seconds": 3600}
-        refusal = _refusal(lambda: execute_purge_candidates(STALE, token, wider))
+        previewed = {"older_than_seconds": 5 * 86400}
+        # 6 days matches the same single row as 5 days, so the row set and its
+        # fingerprint are identical and only the param binding can refuse it.
+        changed = {"older_than_seconds": 6 * 86400}
+        token = _token(STALE, previewed)
+        refusal = _refusal_text(lambda: execute_purge_candidates(STALE, token, changed))
     remaining = SampleRecord.objects.count()
-    if refusal is None or remaining != 2:
-        return not_blocked(f"wider execute result {refusal}, {remaining} of 2 remain")
-    return blocked("token for a 5 day window rejected a 1 hour window, 2 of 2 remain")
+    if refusal != TOKEN_ERROR_MESSAGE or remaining != 2:
+        return not_blocked(f"changed value result {refusal!r}, {remaining} of 2 remain")
+    return blocked("token for 5 days refused 6 days over the same row, 2 of 2 remain")
 
 
 @attack("binding-extra-param")
@@ -465,12 +476,18 @@ def allowlist_model_removed() -> Outcome:
 @attack("allowlist-empty")
 def allowlist_empty() -> Outcome:
     make_samples(3)
+    with harness_settings():
+        # A real token under the normal allowlist, so only the allowlist can
+        # be what refuses the execute below.
+        token = _token()
     with harness_settings(DB_PURGE_MCP_ALLOWED_MODELS=[]):
         at_preview = _refusal(lambda: preview_purge_candidates(STALE, STALE_PARAMS))
         at_list = _refusal(describe_policies)
-        at_execute = _refusal(
-            lambda: execute_purge_candidates(STALE, "forged", STALE_PARAMS)
+        at_execute = _refusal_text(
+            lambda: execute_purge_candidates(STALE, token, STALE_PARAMS)
         )
+    if at_execute == TOKEN_ERROR_MESSAGE:
+        return not_blocked("execute was refused as a token error, not by the allowlist")
     remaining = SampleRecord.objects.count()
     if None in (at_preview, at_list, at_execute) or remaining != 3:
         return not_blocked(f"empty allowlist: {at_preview}, {at_list}, {at_execute}")
@@ -612,29 +629,35 @@ def cap_aggregate_bypass() -> Outcome:
         make_samples(per_window, age_days=10 * cycle)
     deleted = 0
     with harness_settings(DB_PURGE_MCP_MAX_ROWS=cap):
-        # A whole-table purge is refused, as the cap intends.
+        # A whole-table purge must be refused, or there is no per-call cap.
         whole = _refusal(
             lambda: preview_purge_candidates(
                 WINDOW, {"older_than_seconds": 3600, "newer_than_seconds": 10**8}
             )
         )
-        # Narrow windows each hold at most the cap, so every cycle passes.
+        if whole != PurgeRowCapError.__name__:
+            return not_blocked("the whole-table purge was not refused by the cap")
+        # Narrow windows each hold at most the cap, so every cycle passes
+        # the per-call cap. A future cumulative budget would refuse one.
         for cycle in range(1, cycles + 1):
             params = {
                 "older_than_seconds": (10 * cycle - 1) * 86400,
                 "newer_than_seconds": (10 * cycle + 1) * 86400,
             }
-            token = _token(WINDOW, params)
-            result = execute_purge_candidates(WINDOW, token, params)
+            try:
+                token = _token(WINDOW, params)
+                result = execute_purge_candidates(WINDOW, token, params)
+            except PurgePolicyError:
+                return blocked(
+                    f"cycle {cycle} of {cycles} was refused after {deleted} rows "
+                    f"deleted, a cumulative limit exists"
+                )
             deleted += result["deleted_count"]
-    total = cycles * per_window
-    if whole != PurgeRowCapError.__name__:
-        return blocked("the single whole-table purge was refused")
     if deleted > cap:
         return not_blocked(
             f"deleted {deleted} rows over {cycles} cycles under a per-call cap of {cap}"
         )
-    return blocked(f"total deleted stayed within the cap of {cap} across {total} rows")
+    return blocked(f"total deleted stayed within the cap of {cap}")
 
 
 # protocol_injection
