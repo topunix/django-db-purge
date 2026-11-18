@@ -196,3 +196,16 @@ Django `TestCase` suite is unchanged.
 
 adversarial-harness (docs/roadmap.md, Sequenced queue). Verify marker:
 `evals/README.md` on master contains a threat model and a results table.
+
+## Deviations
+
+- The registry, attack-id and report tests live in
+  `tests/adversarial/attacks_test.py` rather than separate files, to stay
+  within Files touched.
+- `pyproject.toml` also sets `pythonpath = ["."]` under
+  `[tool.pytest.ini_options]`, which the spec did not list. Without it
+  pytest-django cannot import `tests.settings`.
+- `injection-oversized-string` was reclassified from `blocked` to `finding`
+  (severity `low`) by the implementer after observing that a 1 MiB argument is
+  written to the call log in full. The maintainer needs to confirm the
+  severity and the 4096 character log record threshold the attack uses.
