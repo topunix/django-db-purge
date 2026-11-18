@@ -95,6 +95,35 @@ jobs:
         run: ruff format --check .
       - name: Mypy
         run: mypy
+  adversarial:
+    # Red-team suite for the MCP tools. pytest and pytest-django are pinned to
+    # the versions verified locally so a new release cannot break CI. The
+    # upload steps run even when a step fails, so the results are always kept.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[mcp]" pytest==9.1.1 pytest-django==4.14.0
+      - name: Run adversarial suite
+        run: >
+          pytest -m adversarial tests/adversarial
+          --junitxml=junit.xml --adversarial-json=results.json
+      - name: Check the committed results table is current
+        run: python -m tests.adversarial.report results.json --check
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-results
+          path: |
+            junit.xml
+            results.json
+          if-no-files-found: ignore
   wheel-smoke-test:
     # Proves the built wheel actually contains dbpurge's code and that
     # Django can discover its management commands. runtests.py alone
