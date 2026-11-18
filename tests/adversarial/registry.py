@@ -259,6 +259,14 @@ CASES: tuple[Case, ...] = (
         category="protocol_injection",
         title="Oversized string argument",
         threat="Exhaust memory, logs or the database with a huge argument.",
+        expected="finding",
+        severity="low",
+        proposed_fix=(
+            "Bound agent-supplied text before it reaches the call log: "
+            "truncate the repr of policy_name and params in _log_call to a "
+            "few hundred characters, and cap policy_name and "
+            "confirmation_token length in the tool signatures."
+        ),
     ),
     Case(
         id="injection-homoglyph-policy-name",
