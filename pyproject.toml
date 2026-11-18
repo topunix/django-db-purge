@@ -33,3 +33,13 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["dbpurge.apps", "dbpurge.management.commands.*"]
 disallow_subclassing_any = false
+
+# Used only by the adversarial suite under tests/adversarial. The existing
+# suite runs under runtests.py and does not need pytest.
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+# The repository root, so tests.settings and tests.models import.
+pythonpath = ["."]
+markers = [
+    "adversarial: red-team cases against the MCP purge surface",
+]
