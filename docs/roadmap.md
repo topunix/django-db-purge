@@ -13,7 +13,7 @@ State sources:
 Items reference each other by name, never by number. Only the maintainer reorders or
 adds items.
 Task specs live in `docs/tasks/`, versioned, deleted after the work lands on `master`.
-The maintainer deletes shipped items after the PR merges.
+Shipped items are deleted in the PR that ships them.
 
 ## Sequenced queue
 
@@ -31,7 +31,6 @@ the attack registry.
      no token. In 1.x a preview reported any count and only execute enforced the cap.
    - `DB_PURGE_MCP_MAX_ROWS` must be a positive integer, so a value of 0 is now
      invalid. In 1.x a value of 0 blocked every purge.
-   Depends on: adversarial-harness.
    Also: fix the stale classifiers in `setup.py` (Python 3.5 and 3.6, Django 2.0) to
    match `python_requires`.
    Verify: `setup.py` on `master` has version 2.0.0 and the README has a migration
@@ -60,8 +59,7 @@ the attack registry.
    Decided: Both deletions happen in the shipping PR, not after merge. The command's
    report drops the "Roadmap entries to delete once merged" section and instead
    confirms both deletions are in the diff. The workflow text in CLAUDE.md is updated
-   to match, since "spec is deleted after the work lands on master" currently reads as
-   a post-merge step.
+   to match.
    Resolve before starting: Whether to add a CI guard that fails a PR when
    docs/tasks/<branch>.md still exists at the PR head, or when the roadmap entry named
    by the branch is still present.
@@ -107,8 +105,7 @@ the attack registry.
 - **cascade-preview**: preview responses report per-related-model cascade counts, so
   the agent and operator see what a delete will take with it.
   Resolve before starting (owner decision):
-  - Whether cascaded rows count toward `DB_PURGE_MCP_MAX_ROWS`. Relates to the
-    suspected aggregate row cap gap in adversarial-harness.
+  - Whether cascaded rows count toward `DB_PURGE_MCP_MAX_ROWS`.
   Verify: a preview response on `master` includes cascade counts keyed by related
   model.
 - **http-transport**: serve MCP over HTTP as well as stdio, so a deployed service can be
