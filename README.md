@@ -599,6 +599,21 @@ This seeds a temporary sqlite database, spawns
 `python -m django purge_mcp_server`, and drives a full list, preview, execute,
 and replay-rejected round trip over JSON-RPC.
 
+### Adversarial suite
+
+A red-team suite attacks the three MCP tools with forged and replayed tokens,
+parameter confusion, row-set drift, scope escapes, row-cap bypasses and
+injection payloads. Each attack is either proven blocked or recorded as a
+finding with a severity and a proposed fix. It needs `pytest` and
+`pytest-django` and does not run under `python runtests.py`:
+
+```bash
+pytest -m adversarial tests/adversarial
+```
+
+The threat model, how findings are recorded and the latest results are in
+[evals/README.md](evals/README.md).
+
 ## Contributing
 
 Issues and pull requests are welcome on GitHub.
