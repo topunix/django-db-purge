@@ -55,6 +55,34 @@ the attack registry.
    Verify: a test on master asserts db_purge deletes in more than one batch when matches
    exceed the batch size.
 
+3. **roadmap-command-ship-cleanup**: make the /roadmap command delete the shipped
+   roadmap entry and its task spec on the branch, inside the PR that ships the work.
+   Decided: Both deletions happen in the shipping PR, not after merge. The command's
+   report drops the "Roadmap entries to delete once merged" section and instead
+   confirms both deletions are in the diff. The workflow text in CLAUDE.md is updated
+   to match, since "spec is deleted after the work lands on master" currently reads as
+   a post-merge step.
+   Resolve before starting: Whether to add a CI guard that fails a PR when
+   docs/tasks/<branch>.md still exists at the PR head, or when the roadmap entry named
+   by the branch is still present.
+   Verify: The /roadmap command definition instructs the implementer to delete the
+   roadmap entry and docs/tasks/<slug>.md on the branch, and contains no "delete once
+   merged" wording.
+
+4. **audit-log-truncation**: cap the logged size of tool arguments so oversized inputs
+   cannot bloat the audit log.
+   Decided: Threshold is 4096 characters. Past it, log the first 4096 characters, the
+   original length, and a sha256 of the full value.
+   Resolve before starting: Whether truncation applies to accepted calls as well as
+   rejected ones.
+   Verify: injection-oversized-string reports blocked in evals/README.md.
+
+5. **deletion-budget**: enforce a rolling-window deletion budget per policy so repeated
+   preview and execute cycles cannot exceed the row cap in aggregate.
+   Resolve before starting: Window length and default budget. Where budget state lives
+   (database table or cache). Behavior across multiple server processes.
+   Verify: cap-aggregate-bypass reports blocked in evals/README.md.
+
 ## Unscheduled
 - **django-stubs**: add Django type stubs and the mypy plugin so strict mode
   covers model and queryset types. Also removes the `disallow_subclassing_any`
