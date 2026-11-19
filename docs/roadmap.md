@@ -12,7 +12,8 @@ State sources:
 
 Items reference each other by name, never by number. Only the maintainer reorders or
 adds items.
-Task specs live in `docs/tasks/`, versioned, deleted after the work lands on `master`.
+Task specs live in `docs/tasks/`, versioned.
+Task specs are deleted in the PR that ships the work.
 Shipped items are deleted in the PR that ships them.
 
 ## Sequenced queue
