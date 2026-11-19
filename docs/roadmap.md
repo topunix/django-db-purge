@@ -22,24 +22,7 @@ and are measured against a real load test before they are changed. retention-hol
 cascade-preview are parked in Unscheduled. If they return, they add their own sections to
 the attack registry.
 
-1. **adversarial-harness**: a declarative attack registry and runner that red-teams the
-   MCP surface, with a published results table.
-   Decided: categories are token lifecycle, parameter binding, row-set fingerprinting,
-   allowlist and scope escape, row cap enforcement, and protocol/injection. The
-   first commit of the task is the registry alone, at tests/adversarial/registry.py,
-   with at least three cases per category. The maintainer revises it in PR review, not
-   in chat.
-   Decided: tests are hermetic and deterministic, live in `tests/adversarial/` under
-   their own pytest marker, and emit JUnit and JSON. The markdown results table is
-   generated, not hand-written. A CI job runs the suite.
-   Decided: a case the server fails to block is recorded as a finding with severity and
-   reported with a proposed fix. It is never quietly patched.
-   Decided: injection testing is a static payload corpus. A live agent loop is out of
-   scope for CI and would be a separate opt-in script.
-   Suspected gap: aggregate row cap bypass across multiple calls.
-   Verify: `evals/README.md` on `master` contains a threat model and a results table.
-
-2. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
+1. **release-2-0**: version bump to 2.0.0 and a migration note showing the old `days`
    call expressed as a policy. The maintainer publishes to PyPI through the existing
    `publish.yml` release workflow after the PR merges.
    Decided: the task never publishes, tags, or creates a GitHub release.
@@ -54,7 +37,7 @@ the attack registry.
    Verify: `setup.py` on `master` has version 2.0.0 and the README has a migration
    section.
 
-3. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
+2. **cron-batched-delete**: the db_purge cron command deletes in bounded batches instead
    of one count() and one queryset.delete().
    Decided: measure first. Run it against a large, growing table under load and record
    the numbers before changing anything, so the change ships with a before and after.
