@@ -11,6 +11,7 @@ is 1 when the file would change.
 import argparse
 import json
 import sys
+from collections import Counter
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,8 @@ def replace_region(text: str, region: str) -> str:
 
 def main(argv: list[str] | None = None, case_ids: Collection[str] | None = None) -> int:
     """
-    Run the report. Exit 2 when the results do not cover exactly the case ids.
+    Run the report. Exit 2 when the results do not cover exactly the case ids,
+    or when two records share an id.
 
     case_ids defaults to the registry, so a case whose attack crashed or
     was never run cannot pass the staleness check silently.
@@ -89,7 +91,12 @@ def main(argv: list[str] | None = None, case_ids: Collection[str] | None = None)
 
     results = json.loads(Path(args.results).read_text(encoding="utf-8"))
     wanted = {case.id for case in CASES} if case_ids is None else set(case_ids)
-    found = {record["id"] for record in results}
+    counts = Counter(record["id"] for record in results)
+    duplicated = sorted(case_id for case_id, count in counts.items() if count > 1)
+    if duplicated:
+        print(f"duplicate result ids {duplicated}", file=sys.stderr)
+        return 2
+    found = set(counts)
     if found != wanted:
         print(
             f"results and registry differ, missing {sorted(wanted - found)}, "
